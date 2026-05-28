@@ -468,7 +468,7 @@ defaults to `zabbix_oob_hostid`.
         "templates": ["Template Module ICMP Ping"],
         "oob": {
             "name_prefix": "drac-",
-            "templates": ["Template Net Network Generic Device SNMP"],
+            "templates": [" Dell iDRAC by SNMP"],
             "interface_type": 2,
             "snmp": {
                 "version": 2,
