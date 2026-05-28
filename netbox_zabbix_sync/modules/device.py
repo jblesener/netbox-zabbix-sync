@@ -453,7 +453,9 @@ class PhysicalDevice:
         if scope == "esxi":
             return "esxi" in self._platform_name().lower()
         self.logger.warning(
-            "Host %s: Unsupported adopt_scope '%s'. Skipping adoption.", self.name, scope
+            "Host %s: Unsupported adopt_scope '%s'. Skipping adoption.",
+            self.name,
+            scope,
         )
         return False
 
@@ -489,7 +491,9 @@ class PhysicalDevice:
             raise SyncExternalError(message) from e
 
         if not matches:
-            self.logger.debug("Host %s: No existing Zabbix host matched for adoption.", self.name)
+            self.logger.debug(
+                "Host %s: No existing Zabbix host matched for adoption.", self.name
+            )
             return False
         if len(matches) > 1:
             self.logger.warning(
@@ -1015,9 +1019,9 @@ class PhysicalDevice:
                         if isinstance(item, dict) and key == "details":
                             for k, i in item.items():
                                 # Check if the key is found in Zabbix and if the value matches
-                                if k in host["interfaces"][0][key] and host["interfaces"][
-                                    0
-                                ][key][k] != str(i):
+                                if k in host["interfaces"][0][key] and host[
+                                    "interfaces"
+                                ][0][key][k] != str(i):
                                     # If dict has not been created, add it
                                     if key not in updates:
                                         updates[key] = {}

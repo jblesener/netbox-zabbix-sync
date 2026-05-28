@@ -490,9 +490,9 @@ class Sync:
                         zabbix_groups.append(group)
                 adopted = vm.adopt_existing_zabbix_host()
                 full_sync = True
-                if adopted and str(self.config.get("adopt_enrich_mode", "full")).lower() == (
-                    "metadata_only"
-                ):
+                if adopted and str(
+                    self.config.get("adopt_enrich_mode", "full")
+                ).lower() == ("metadata_only"):
                     full_sync = False
                 # Check if VM is already in Zabbix
                 if vm.zabbix_id:

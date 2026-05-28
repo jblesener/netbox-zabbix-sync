@@ -2043,9 +2043,13 @@ class TestAdoptExistingHosts(unittest.TestCase):
         expected_group = (
             self.EXPECTED_VM_HOSTGROUP if vm_mode else self.EXPECTED_DEVICE_HOSTGROUP
         )
-        mock_zabbix.hostgroup.get.return_value = [{"groupid": "1", "name": expected_group}]
+        mock_zabbix.hostgroup.get.return_value = [
+            {"groupid": "1", "name": expected_group}
+        ]
         mock_zabbix.hostgroup.create.return_value = {"groupids": ["2"]}
-        mock_zabbix.template.get.return_value = [{"templateid": "1", "name": "TestTemplate"}]
+        mock_zabbix.template.get.return_value = [
+            {"templateid": "1", "name": "TestTemplate"}
+        ]
         mock_zabbix.proxy.get.return_value = []
         mock_zabbix.proxygroup.get.return_value = []
         mock_zabbix.host.get.return_value = []
@@ -2263,7 +2267,9 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
-    def test_full_mode_keeps_status_sync_after_adoption(self, mock_api, mock_zabbix_api):
+    def test_full_mode_keeps_status_sync_after_adoption(
+        self, mock_api, mock_zabbix_api
+    ):
         """full mode should retain existing consistency behavior after adoption."""
         platform = MagicMock()
         platform.name = "VMware ESXi"
