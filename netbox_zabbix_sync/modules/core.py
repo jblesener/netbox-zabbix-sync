@@ -212,6 +212,12 @@ class Sync:
             for group in hostgroups:
                 # Add new hostgroups to zabbix group list
                 zabbix_groups.append(group)
+        adopted = device.adopt_existing_zabbix_host()
+        full_sync = True
+        if adopted and str(device_config.get("adopt_enrich_mode", "full")).lower() == (
+            "metadata_only"
+        ):
+            full_sync = False
         # Check if device is already in Zabbix
         if device.zabbix_id:
             device.consistency_check(
@@ -220,6 +226,7 @@ class Sync:
                 zabbix_proxy_list,
                 device_config["full_proxy_sync"],
                 device_config["create_hostgroups"],
+                full_sync=full_sync,
             )
             return True
         # Add device to Zabbix
@@ -481,6 +488,12 @@ class Sync:
                     for group in hostgroups:
                         # Add new hostgroups to zabbix group list
                         zabbix_groups.append(group)
+                adopted = vm.adopt_existing_zabbix_host()
+                full_sync = True
+                if adopted and str(self.config.get("adopt_enrich_mode", "full")).lower() == (
+                    "metadata_only"
+                ):
+                    full_sync = False
                 # Check if VM is already in Zabbix
                 if vm.zabbix_id:
                     vm.consistency_check(
@@ -489,6 +502,7 @@ class Sync:
                         zabbix_proxy_list,
                         self.config["full_proxy_sync"],
                         self.config["create_hostgroups"],
+                        full_sync=full_sync,
                     )
                     continue
                 # Add VM to Zabbix

@@ -14,6 +14,14 @@ _BOOL_ARGS = [
     ("create_journal", "Create NetBox journal entries on changes."),
     ("sync_vms", "Enable virtual machine sync."),
     (
+        "adopt_existing_hosts",
+        "Adopt matching existing Zabbix hosts by name when NetBox host ID is empty.",
+    ),
+    (
+        "adopt_for_vms",
+        "Allow host adoption for virtual machines when adoption is enabled.",
+    ),
+    (
         "full_proxy_sync",
         "Enable full proxy sync (removes proxies not in config context).",
     ),
@@ -59,6 +67,16 @@ _STR_ARGS = [
         "vm_hostgroup_format",
         "Hostgroup path pattern for virtual machines (e.g. cluster_type/cluster/role).",
         "PATTERN",
+    ),
+    (
+        "adopt_scope",
+        "Adoption target scope for empty-hostid objects (e.g. esxi, all).",
+        "SCOPE",
+    ),
+    (
+        "adopt_enrich_mode",
+        "Adoption enrichment mode: full or metadata_only.",
+        "MODE",
     ),
     (
         "inventory_mode",

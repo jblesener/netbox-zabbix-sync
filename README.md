@@ -172,6 +172,37 @@ Make sure that the Zabbix user has proper permissions to create hosts. The
 hostgroups are in a nested format. This means that proper permissions only need
 to be applied to the site name hostgroup and cascaded to any child hostgroups.
 
+### Existing host adoption (ESXi-first)
+
+You can let the syncer adopt existing Zabbix hosts when the NetBox host ID
+custom field is empty. This is useful when hosts are pre-created by Zabbix
+discovery (for example VMware LLD).
+
+```python
+adopt_existing_hosts = True
+adopt_scope = "esxi"           # "esxi" or "all"
+adopt_for_vms = True           # include VMs in adoption scope checks
+adopt_enrich_mode = "full"     # "full" or "metadata_only"
+```
+
+Behavior:
+
+- Adoption is attempted only for objects in scope.
+- `adopt_scope = "esxi"` matches objects where NetBox `platform` contains
+  `ESXi` (case-insensitive).
+- A unique name match in Zabbix is required. If multiple hosts match, adoption
+  is skipped for safety.
+- On successful adoption, the script writes the matched `hostid` into the
+  configured NetBox custom field (`device_cf`, or `oob_device_cf` for OOB
+  split imports).
+
+`adopt_enrich_mode` controls post-adoption sync:
+
+- `full`: keep normal consistency checks (templates, groups, status, proxy,
+  interfaces, inventory, usermacros, tags).
+- `metadata_only`: sync metadata-oriented fields only (inventory mode/inventory,
+  usermacros, tags), and skip template/group/status/proxy/interface changes.
+
 #### Layout
 
 The default hostgroup layout is "site/manufacturer/device_role". You can change

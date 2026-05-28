@@ -432,6 +432,83 @@ class PhysicalDevice:
         host = self.zabbix.host.get(filter=zbx_filter, output=[])
         return bool(host)
 
+    def _platform_name(self):
+        """Return normalized platform name for scope matching."""
+        platform = getattr(self.nb, "platform", None)
+        if not platform:
+            return ""
+        if hasattr(platform, "name") and platform.name:
+            return str(platform.name)
+        return str(platform)
+
+    def _is_adoption_candidate(self):
+        """Check whether this object should be considered for host adoption."""
+        if not self.config.get("adopt_existing_hosts"):
+            return False
+        if self.hostgroup_type == "vm" and not self.config.get("adopt_for_vms", True):
+            return False
+        scope = str(self.config.get("adopt_scope", "esxi")).lower()
+        if scope in ("", "all"):
+            return True
+        if scope == "esxi":
+            return "esxi" in self._platform_name().lower()
+        self.logger.warning(
+            "Host %s: Unsupported adopt_scope '%s'. Skipping adoption.", self.name, scope
+        )
+        return False
+
+    def _zabbix_name_lookup_candidates(self):
+        """Build host.get filters for name-based lookup."""
+        lookups = [{"host": self.name}]
+        if self.use_visible_name:
+            lookups.append({"name": self.visible_name})
+        else:
+            lookups.append({"name": self.name})
+        return list(dict.fromkeys(tuple(sorted(i.items())) for i in lookups))
+
+    def adopt_existing_zabbix_host(self):
+        """
+        Link to an existing Zabbix host by name if this object is in adoption scope.
+
+        Returns True when adoption succeeded, otherwise False.
+        """
+        if self.zabbix_id or not self._is_adoption_candidate():
+            return False
+        matches = {}
+        try:
+            for lookup_tuple in self._zabbix_name_lookup_candidates():
+                lookup = dict(lookup_tuple)
+                for host in self.zabbix.host.get(
+                    filter=lookup, output=["hostid", "host", "name"]
+                ):
+                    if "hostid" in host:
+                        matches[host["hostid"]] = host
+        except APIRequestError as e:
+            message = f"Host {self.name}: Adoption lookup failed. Zabbix returned {e}."
+            self.logger.error(message)
+            raise SyncExternalError(message) from e
+
+        if not matches:
+            self.logger.debug("Host %s: No existing Zabbix host matched for adoption.", self.name)
+            return False
+        if len(matches) > 1:
+            self.logger.warning(
+                "Host %s: Multiple Zabbix hosts matched by name. Skipping adoption.",
+                self.name,
+            )
+            return False
+
+        host = next(iter(matches.values()))
+        self.zabbix_id = int(host["hostid"])
+        self.nb.custom_fields[self.device_cf] = self.zabbix_id
+        self.nb.save()
+        self.logger.info(
+            "Host %s: Adopted existing Zabbix host by name. (ID:%s)",
+            self.name,
+            self.zabbix_id,
+        )
+        return True
+
     def set_interface_details(self):
         """
         Checks interface parameters from NetBox and
@@ -694,35 +771,42 @@ class PhysicalDevice:
         self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
 
     def consistency_check(
-        self, groups, templates, proxies, proxy_power, create_hostgroups
+        self,
+        groups,
+        templates,
+        proxies,
+        proxy_power,
+        create_hostgroups,
+        full_sync=True,
     ):
         """
         Checks if Zabbix object is still valid with NetBox parameters.
         """
-        # If group is found or if the hostgroup is nested
-        # or len(self.hostgroups.split("/")) > 1:
-        if not self.set_zbx_groupid(groups):
-            if create_hostgroups:
-                # Script is allowed to create a new hostgroup
-                new_groups = self.create_zbx_hostgroup(groups)
-                for group in new_groups:
-                    # Add all new groups to the list of groups
-                    groups.append(group)
-            # check if the initial group was not already found (and this is a nested folder check)
-            if not self.group_ids:
-                zbx_groupid_confirmation = self.set_zbx_groupid(groups)
-                if not zbx_groupid_confirmation and not create_hostgroups:
-                    # Function returns true / false but also sets GroupID
-                    e = (
-                        f"Host {self.name}: different hostgroup is required but "
-                        "unable to create hostgroup without generation permission."
-                    )
-                    self.logger.warning(e)
-                    raise SyncInventoryError(e)
+        if full_sync:
+            # If group is found or if the hostgroup is nested
+            # or len(self.hostgroups.split("/")) > 1:
+            if not self.set_zbx_groupid(groups):
+                if create_hostgroups:
+                    # Script is allowed to create a new hostgroup
+                    new_groups = self.create_zbx_hostgroup(groups)
+                    for group in new_groups:
+                        # Add all new groups to the list of groups
+                        groups.append(group)
+                # check if the initial group was not already found (and this is a nested folder check)
+                if not self.group_ids:
+                    zbx_groupid_confirmation = self.set_zbx_groupid(groups)
+                    if not zbx_groupid_confirmation and not create_hostgroups:
+                        # Function returns true / false but also sets GroupID
+                        e = (
+                            f"Host {self.name}: different hostgroup is required but "
+                            "unable to create hostgroup without generation permission."
+                        )
+                        self.logger.warning(e)
+                        raise SyncInventoryError(e)
 
-        # Prepare templates and proxy config
-        self.zbx_template_prepper(templates)
-        self._set_proxy(proxies)
+            # Prepare templates and proxy config
+            self.zbx_template_prepper(templates)
+            self._set_proxy(proxies)
         # Get host object from Zabbix
         host = self.zabbix.host.get(
             filter={"hostid": self.zabbix_id},
@@ -750,118 +834,120 @@ class PhysicalDevice:
             self.logger.error(e)
             raise SyncInventoryError(e)
         host = host[0]
-        if host["host"] == self.name:
-            self.logger.debug("Host %s: Hostname in-sync.", self.name)
-        else:
-            self.logger.info(
-                "Host %s: Hostname OUT of sync. Received value: %s",
-                self.name,
-                host["host"],
-            )
-            self.update_zabbix_host(host=self.name)
-
-        # Execute check depending on wether the name is special or not
-        if self.use_visible_name:
-            if host["name"] == self.visible_name:
-                self.logger.debug("Host %s: Visible name in-sync.", self.name)
+        if full_sync:
+            if host["host"] == self.name:
+                self.logger.debug("Host %s: Hostname in-sync.", self.name)
             else:
                 self.logger.info(
-                    "Host %s: Visible name OUT of sync. Received value: %s",
+                    "Host %s: Hostname OUT of sync. Received value: %s",
                     self.name,
-                    host["name"],
+                    host["host"],
                 )
-                self.update_zabbix_host(name=self.visible_name)
+                self.update_zabbix_host(host=self.name)
 
-        # Check if the templates are in-sync
-        if not self.zbx_template_comparer(host["parentTemplates"]):
-            self.logger.info("Host %s: Template(s) OUT of sync.", self.name)
-            # Prepare Templates for API parsing
-            templateids = []
-            for template in self.zbx_templates:
-                templateids.append({"templateid": template["templateid"]})
-            # Update Zabbix with NB templates and clear any old / lost templates
-            self.update_zabbix_host(
-                templates_clear=host["parentTemplates"], templates=templateids
-            )
-        else:
-            self.logger.debug("Host %s: Template(s) in-sync.", self.name)
-
-        # Check if Zabbix version is 6 or higher. Issue #93
-        group_dictname = "hostgroups"
-        if str(self.zabbix.version).startswith(("6", "5")):
-            group_dictname = "groups"
-        # Check if hostgroups match
-        if sorted(host[group_dictname], key=itemgetter("groupid")) == sorted(
-            self.group_ids, key=itemgetter("groupid")
-        ):
-            self.logger.debug("Host %s: Hostgroups in-sync.", self.name)
-        else:
-            self.logger.info("Host %s: Hostgroups OUT of sync.", self.name)
-            self.update_zabbix_host(groups=self.group_ids)
-
-        if int(host["status"]) == self.zabbix_state:
-            self.logger.debug("Host %s: Status in-sync.", self.name)
-        else:
-            self.logger.info("Host %s: Status OUT of sync.", self.name)
-            self.update_zabbix_host(status=str(self.zabbix_state))
-
-        # Check if a proxy has been defined
-        if self.zbxproxy:
-            # Check if proxy or proxy group is defined.
-            # Check for proxy_hostid for backwards compatibility with Zabbix <= 6
-            if (
-                self.zbxproxy["idtype"] in host
-                and host[self.zbxproxy["idtype"]] == self.zbxproxy["id"]
-            ) or (
-                "proxy_hostid" in host and host["proxy_hostid"] == self.zbxproxy["id"]
-            ):
-                self.logger.debug("Host %s: Proxy in-sync.", self.name)
-            # Proxy does not match, update Zabbix
-            else:
-                self.logger.info("Host %s: Proxy OUT of sync.", self.name)
-                # Zabbix <= 6 patch
-                if not str(self.zabbix.version).startswith("7"):
-                    self.update_zabbix_host(proxy_hostid=self.zbxproxy["id"])
-                # Zabbix 7+
+            # Execute check depending on wether the name is special or not
+            if self.use_visible_name:
+                if host["name"] == self.visible_name:
+                    self.logger.debug("Host %s: Visible name in-sync.", self.name)
                 else:
-                    # Prepare data structure for updating either proxy or group
-                    update_data = {
-                        self.zbxproxy["idtype"]: self.zbxproxy["id"],
-                        "monitored_by": self.zbxproxy["monitored_by"],
-                    }
-                    self.update_zabbix_host(**update_data)
-        else:
-            # No proxy is defined in NetBox
-            proxy_set = False
-            # Check if a proxy is defined. Uses the proxy_hostid key for backwards compatibility
-            for key in ("proxy_hostid", "proxyid", "proxy_groupid"):
-                if key in host and bool(int(host[key])):
-                    proxy_set = True
-            if proxy_power and proxy_set:
-                # Zabbix <= 6 fix
-                self.logger.warning(
-                    "Host %s: No proxy is configured in NetBox but is configured in Zabbix."
-                    "Removing proxy config in Zabbix",
-                    self.name,
+                    self.logger.info(
+                        "Host %s: Visible name OUT of sync. Received value: %s",
+                        self.name,
+                        host["name"],
+                    )
+                    self.update_zabbix_host(name=self.visible_name)
+
+            # Check if the templates are in-sync
+            if not self.zbx_template_comparer(host["parentTemplates"]):
+                self.logger.info("Host %s: Template(s) OUT of sync.", self.name)
+                # Prepare Templates for API parsing
+                templateids = []
+                for template in self.zbx_templates:
+                    templateids.append({"templateid": template["templateid"]})
+                # Update Zabbix with NB templates and clear any old / lost templates
+                self.update_zabbix_host(
+                    templates_clear=host["parentTemplates"], templates=templateids
                 )
-                if "proxy_hostid" in host and bool(host["proxy_hostid"]):
-                    self.update_zabbix_host(proxy_hostid=0)
-                # Zabbix 7 proxy
-                elif "proxyid" in host and bool(host["proxyid"]):
-                    self.update_zabbix_host(proxyid=0, monitored_by=0)
-                # Zabbix 7 proxy group
-                elif "proxy_groupid" in host and bool(host["proxy_groupid"]):
-                    self.update_zabbix_host(proxy_groupid=0, monitored_by=0)
-            # Checks if a proxy has been defined in Zabbix and if proxy_power config has been set
-            if proxy_set and not proxy_power:
-                # Display error message
-                self.logger.warning(
-                    "Host %s: Is configured with proxy in Zabbix but not in NetBox."
-                    "full_proxy_sync is not set: no changes have been made.",
-                    self.name,
-                )
-            if not proxy_set:
-                self.logger.debug("Host %s: Proxy in-sync.", self.name)
+            else:
+                self.logger.debug("Host %s: Template(s) in-sync.", self.name)
+
+            # Check if Zabbix version is 6 or higher. Issue #93
+            group_dictname = "hostgroups"
+            if str(self.zabbix.version).startswith(("6", "5")):
+                group_dictname = "groups"
+            # Check if hostgroups match
+            if sorted(host[group_dictname], key=itemgetter("groupid")) == sorted(
+                self.group_ids, key=itemgetter("groupid")
+            ):
+                self.logger.debug("Host %s: Hostgroups in-sync.", self.name)
+            else:
+                self.logger.info("Host %s: Hostgroups OUT of sync.", self.name)
+                self.update_zabbix_host(groups=self.group_ids)
+
+            if int(host["status"]) == self.zabbix_state:
+                self.logger.debug("Host %s: Status in-sync.", self.name)
+            else:
+                self.logger.info("Host %s: Status OUT of sync.", self.name)
+                self.update_zabbix_host(status=str(self.zabbix_state))
+
+            # Check if a proxy has been defined
+            if self.zbxproxy:
+                # Check if proxy or proxy group is defined.
+                # Check for proxy_hostid for backwards compatibility with Zabbix <= 6
+                if (
+                    self.zbxproxy["idtype"] in host
+                    and host[self.zbxproxy["idtype"]] == self.zbxproxy["id"]
+                ) or (
+                    "proxy_hostid" in host
+                    and host["proxy_hostid"] == self.zbxproxy["id"]
+                ):
+                    self.logger.debug("Host %s: Proxy in-sync.", self.name)
+                # Proxy does not match, update Zabbix
+                else:
+                    self.logger.info("Host %s: Proxy OUT of sync.", self.name)
+                    # Zabbix <= 6 patch
+                    if not str(self.zabbix.version).startswith("7"):
+                        self.update_zabbix_host(proxy_hostid=self.zbxproxy["id"])
+                    # Zabbix 7+
+                    else:
+                        # Prepare data structure for updating either proxy or group
+                        update_data = {
+                            self.zbxproxy["idtype"]: self.zbxproxy["id"],
+                            "monitored_by": self.zbxproxy["monitored_by"],
+                        }
+                        self.update_zabbix_host(**update_data)
+            else:
+                # No proxy is defined in NetBox
+                proxy_set = False
+                # Check if a proxy is defined. Uses the proxy_hostid key for backwards compatibility
+                for key in ("proxy_hostid", "proxyid", "proxy_groupid"):
+                    if key in host and bool(int(host[key])):
+                        proxy_set = True
+                if proxy_power and proxy_set:
+                    # Zabbix <= 6 fix
+                    self.logger.warning(
+                        "Host %s: No proxy is configured in NetBox but is configured in Zabbix."
+                        "Removing proxy config in Zabbix",
+                        self.name,
+                    )
+                    if "proxy_hostid" in host and bool(host["proxy_hostid"]):
+                        self.update_zabbix_host(proxy_hostid=0)
+                    # Zabbix 7 proxy
+                    elif "proxyid" in host and bool(host["proxyid"]):
+                        self.update_zabbix_host(proxyid=0, monitored_by=0)
+                    # Zabbix 7 proxy group
+                    elif "proxy_groupid" in host and bool(host["proxy_groupid"]):
+                        self.update_zabbix_host(proxy_groupid=0, monitored_by=0)
+                # Checks if a proxy has been defined in Zabbix and if proxy_power config has been set
+                if proxy_set and not proxy_power:
+                    # Display error message
+                    self.logger.warning(
+                        "Host %s: Is configured with proxy in Zabbix but not in NetBox."
+                        "full_proxy_sync is not set: no changes have been made.",
+                        self.name,
+                    )
+                if not proxy_set:
+                    self.logger.debug("Host %s: Proxy in-sync.", self.name)
         # Check host inventory mode
         if str(host["inventory_mode"]) == str(self.inventory_mode):
             self.logger.debug("Host %s: inventory_mode in-sync.", self.name)
@@ -916,75 +1002,76 @@ class PhysicalDevice:
                 self.logger.info("Host %s: Tags OUT of sync.", self.name)
                 self.update_zabbix_host(tags=self.tags)
 
-        # If only 1 interface has been found
-        if len(host["interfaces"]) == 1:
-            updates = {}
-            # Go through each key / item and check if it matches Zabbix
-            for key, item in self.set_interface_details()[0].items():
-                # Check if NetBox value is found in Zabbix
-                if key in host["interfaces"][0]:
-                    # If SNMP is used, go through nested dict
-                    # to compare SNMP parameters
-                    if isinstance(item, dict) and key == "details":
-                        for k, i in item.items():
-                            # Check if the key is found in Zabbix and if the value matches
-                            if k in host["interfaces"][0][key] and host["interfaces"][
-                                0
-                            ][key][k] != str(i):
-                                # If dict has not been created, add it
-                                if key not in updates:
-                                    updates[key] = {}
-                                updates[key][k] = str(i)
-                                # If SNMP version has been changed
-                                # break loop and force full SNMP update
-                                if k == "version":
-                                    break
-                        # Force full SNMP config update
-                        # when version has changed.
-                        if key in updates and "version" in updates[key]:
+        if full_sync:
+            # If only 1 interface has been found
+            if len(host["interfaces"]) == 1:
+                updates = {}
+                # Go through each key / item and check if it matches Zabbix
+                for key, item in self.set_interface_details()[0].items():
+                    # Check if NetBox value is found in Zabbix
+                    if key in host["interfaces"][0]:
+                        # If SNMP is used, go through nested dict
+                        # to compare SNMP parameters
+                        if isinstance(item, dict) and key == "details":
                             for k, i in item.items():
-                                updates[key][k] = str(i)
-                        continue
-                    # Set update if values don't match
-                    if host["interfaces"][0][key] != str(item):
-                        updates[key] = item
-            if updates:
-                # If interface updates have been found: push to Zabbix
-                self.logger.info("Host %s: Interface OUT of sync.", self.name)
-                if "type" in updates:
-                    # Changing interface type not supported. Raise exception.
-                    e = (
-                        f"Host {self.name}: Changing interface type to "
-                        f"{updates['type']} is not supported."
-                    )
-                    self.logger.error(e)
-                    raise InterfaceConfigError(e)
-                # Set interfaceID for Zabbix config
-                updates["interfaceid"] = host["interfaces"][0]["interfaceid"]
-                try:
-                    # API call to Zabbix
-                    self.zabbix.hostinterface.update(updates)
-                    err_msg = (
-                        f"Host {self.name}: Updated interface "
-                        f"with data {sanatize_log_output(updates)}."
-                    )
-                    self.logger.info(err_msg)
-                    self.create_journal_entry("info", err_msg)
-                except APIRequestError as e:
-                    msg = f"Zabbix returned the following error: {e}."
-                    self.logger.error(msg)
-                    raise SyncExternalError(msg) from e
+                                # Check if the key is found in Zabbix and if the value matches
+                                if k in host["interfaces"][0][key] and host["interfaces"][
+                                    0
+                                ][key][k] != str(i):
+                                    # If dict has not been created, add it
+                                    if key not in updates:
+                                        updates[key] = {}
+                                    updates[key][k] = str(i)
+                                    # If SNMP version has been changed
+                                    # break loop and force full SNMP update
+                                    if k == "version":
+                                        break
+                            # Force full SNMP config update
+                            # when version has changed.
+                            if key in updates and "version" in updates[key]:
+                                for k, i in item.items():
+                                    updates[key][k] = str(i)
+                            continue
+                        # Set update if values don't match
+                        if host["interfaces"][0][key] != str(item):
+                            updates[key] = item
+                if updates:
+                    # If interface updates have been found: push to Zabbix
+                    self.logger.info("Host %s: Interface OUT of sync.", self.name)
+                    if "type" in updates:
+                        # Changing interface type not supported. Raise exception.
+                        e = (
+                            f"Host {self.name}: Changing interface type to "
+                            f"{updates['type']} is not supported."
+                        )
+                        self.logger.error(e)
+                        raise InterfaceConfigError(e)
+                    # Set interfaceID for Zabbix config
+                    updates["interfaceid"] = host["interfaces"][0]["interfaceid"]
+                    try:
+                        # API call to Zabbix
+                        self.zabbix.hostinterface.update(updates)
+                        err_msg = (
+                            f"Host {self.name}: Updated interface "
+                            f"with data {sanatize_log_output(updates)}."
+                        )
+                        self.logger.info(err_msg)
+                        self.create_journal_entry("info", err_msg)
+                    except APIRequestError as e:
+                        msg = f"Zabbix returned the following error: {e}."
+                        self.logger.error(msg)
+                        raise SyncExternalError(msg) from e
+                else:
+                    # If no updates are found, Zabbix interface is in-sync
+                    self.logger.debug("Host %s: Interface in-sync.", self.name)
             else:
-                # If no updates are found, Zabbix interface is in-sync
-                self.logger.debug("Host %s: Interface in-sync.", self.name)
-        else:
-            err_msg = (
-                f"Host {self.name}: Has unsupported interface configuration."
-                f" Host has total of {len(host['interfaces'])} interfaces. "
-                "Manual intervention required."
-            )
-            self.logger.error(err_msg)
-            raise SyncInventoryError(err_msg)
+                err_msg = (
+                    f"Host {self.name}: Has unsupported interface configuration."
+                    f" Host has total of {len(host['interfaces'])} interfaces. "
+                    "Manual intervention required."
+                )
+                self.logger.error(err_msg)
+                raise SyncInventoryError(err_msg)
 
     def create_journal_entry(self, severity, message):
         """

@@ -2014,3 +2014,288 @@ class TestCombineFilters(unittest.TestCase):
         self.assertEqual(filter_call_kwargs.get("site"), "fra01")
         self.assertEqual(filter_call_kwargs.get("status"), "active")
         self.assertEqual(filter_call_kwargs.get("name"), "router*")
+
+
+class TestAdoptExistingHosts(unittest.TestCase):
+    """Test adoption of existing Zabbix hosts by name."""
+
+    EXPECTED_DEVICE_HOSTGROUP = "TestSite/TestManufacturer/Switch"
+    EXPECTED_VM_HOSTGROUP = "TestSite/Switch"
+
+    def _setup_netbox_mock(self, mock_api, devices=None, vms=None):
+        """Helper to setup a working NetBox mock."""
+        mock_netbox = MagicMock()
+        mock_api.return_value = mock_netbox
+        mock_netbox.version = "3.5"
+        mock_netbox.extras.custom_fields.filter.return_value = []
+        mock_netbox.dcim.devices.filter.return_value = devices or []
+        mock_netbox.virtualization.virtual_machines.filter.return_value = vms or []
+        mock_netbox.dcim.site_groups.all.return_value = []
+        mock_netbox.dcim.regions.all.return_value = []
+        mock_netbox.extras.journal_entries = MagicMock()
+        return mock_netbox
+
+    def _setup_zabbix_mock(self, mock_zabbix_api, version=7.0, vm_mode=False):
+        """Helper to setup a working Zabbix mock."""
+        mock_zabbix = MagicMock()
+        mock_zabbix_api.return_value = mock_zabbix
+        mock_zabbix.version = version
+        expected_group = (
+            self.EXPECTED_VM_HOSTGROUP if vm_mode else self.EXPECTED_DEVICE_HOSTGROUP
+        )
+        mock_zabbix.hostgroup.get.return_value = [{"groupid": "1", "name": expected_group}]
+        mock_zabbix.hostgroup.create.return_value = {"groupids": ["2"]}
+        mock_zabbix.template.get.return_value = [{"templateid": "1", "name": "TestTemplate"}]
+        mock_zabbix.proxy.get.return_value = []
+        mock_zabbix.proxygroup.get.return_value = []
+        mock_zabbix.host.get.return_value = []
+        mock_zabbix.host.create.return_value = {"hostids": ["1"]}
+        mock_zabbix.host.update.return_value = {"hostids": ["42"]}
+        mock_zabbix.host.delete.return_value = [42]
+        return mock_zabbix
+
+    def _make_zabbix_host(self, hostname="test-host", status="0"):
+        """Build a minimal host response for consistency_check."""
+        return [
+            {
+                "hostid": "77",
+                "host": hostname,
+                "name": hostname,
+                "parentTemplates": [{"templateid": "1"}],
+                "hostgroups": [{"groupid": "1"}],
+                "groups": [{"groupid": "1"}],
+                "status": status,
+                "interfaces": [{}],
+                "inventory_mode": "-1",
+                "inventory": {},
+                "macros": [],
+                "tags": [],
+                "proxy_hostid": "0",
+                "proxyid": "0",
+                "proxy_groupid": "0",
+            }
+        ]
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopt_existing_esxi_device_by_name(self, mock_api, mock_zabbix_api):
+        """ESXi device with empty hostid should be adopted and synced as linked."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-host01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = [
+            [{"hostid": "77", "host": "esxi-host01", "name": "esxi-host01"}],
+            [],
+            self._make_zabbix_host(hostname="esxi-host01", status="0"),
+        ]
+
+        syncer = Sync({"adopt_existing_hosts": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopt_existing_esxi_vm_by_name(self, mock_api, mock_zabbix_api):
+        """ESXi VM with empty hostid should be adopted and synced as linked."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        vm = MockNetboxVM(
+            name="esxi-vm01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [{"hostid": "77", "host": "esxi-vm01", "name": "esxi-vm01"}],
+            [],
+            self._make_zabbix_host(hostname="esxi-vm01", status="0"),
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_non_esxi_device_not_adopted(self, mock_api, mock_zabbix_api):
+        """Non-ESXi device should continue create path when hostid is empty."""
+        platform = MagicMock()
+        platform.name = "Ubuntu Linux"
+        device = MockNetboxDevice(
+            name="linux-host01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync({"adopt_existing_hosts": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_called_once()
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_multiple_name_matches_are_not_adopted(self, mock_api, mock_zabbix_api):
+        """Multiple name matches should skip adoption to avoid wrong links."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-host02",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = [
+            [
+                {"hostid": "77", "host": "esxi-host02", "name": "esxi-host02"},
+                {"hostid": "78", "host": "esxi-host02", "name": "esxi-host02"},
+            ],
+            [],
+            [{"hostid": "77"}],
+        ]
+
+        syncer = Sync({"adopt_existing_hosts": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertIsNone(device.custom_fields["zabbix_hostid"])
+        mock_zabbix.host.create.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_metadata_only_mode_skips_status_update_after_adoption(
+        self, mock_api, mock_zabbix_api
+    ):
+        """metadata_only should avoid full consistency updates after adoption."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        vm = MockNetboxVM(
+            name="esxi-vm02",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [{"hostid": "77", "host": "esxi-vm02", "name": "esxi-vm02"}],
+            [],
+            self._make_zabbix_host(hostname="esxi-vm02", status="1"),
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "adopt_enrich_mode": "metadata_only",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_full_mode_keeps_status_sync_after_adoption(self, mock_api, mock_zabbix_api):
+        """full mode should retain existing consistency behavior after adoption."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        vm = MockNetboxVM(
+            name="esxi-vm03",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [{"hostid": "77", "host": "esxi-vm03", "name": "esxi-vm03"}],
+            [],
+            self._make_zabbix_host(hostname="esxi-vm03", status="1"),
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.update.assert_called_once_with(hostid=77, status="0")
