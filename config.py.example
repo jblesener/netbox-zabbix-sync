@@ -11,6 +11,9 @@ templates_config_context_overrule = False
 # Template_cf is not used when templates_config_context is enabled
 template_cf = "zabbix_template"
 device_cf = "zabbix_hostid"
+# Used by config-context split imports when importing a device's oob_ip
+# as a separate Zabbix host.
+oob_device_cf = "zabbix_oob_hostid"
 
 # Zabbix host description
 # The following options are available for the description of all created hosts in Zabbix

@@ -31,6 +31,34 @@ from netbox_zabbix_sync.modules.tools import (
 from netbox_zabbix_sync.modules.usermacros import ZabbixUsermacros
 
 
+class NetboxDeviceImport:
+    """
+    Adapter for importing one NetBox device as a distinct Zabbix host.
+
+    It delegates all normal NetBox fields to the original device while overriding
+    the effective host name, primary IP, and config context for one import entry.
+    """
+
+    def __init__(self, nb, name, ip_object, zabbix_context):
+        self.nb = nb
+        self.name = name
+        self.primary_ip = ip_object
+        self.config_context = {"zabbix": zabbix_context}
+
+    def __getattr__(self, name):
+        return getattr(self.nb, name)
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def __iter__(self):
+        data = dict(self.nb)
+        data["name"] = self.name
+        data["primary_ip"] = self.primary_ip
+        data["config_context"] = self.config_context
+        yield from data.items()
+
+
 class PhysicalDevice:
     """
     Represents Network device.
@@ -49,6 +77,7 @@ class PhysicalDevice:
     ):
         self.config = config if config is not None else load_config()
         self.nb = nb
+        self.device_cf = self.config["device_cf"]
         self.id = nb.id
         self.name = nb.name
         self.visible_name = None
@@ -106,10 +135,10 @@ class PhysicalDevice:
             raise SyncInventoryError(e)
 
         # Check if device has custom field for ZBX ID
-        if self.config["device_cf"] in self.nb.custom_fields:
-            self.zabbix_id = self.nb.custom_fields[self.config["device_cf"]]
+        if self.device_cf in self.nb.custom_fields:
+            self.zabbix_id = self.nb.custom_fields[self.device_cf]
         else:
-            e = f"Host {self.name}: Custom field {self.config['device_cf']} not present"
+            e = f"Host {self.name}: Custom field {self.device_cf} not present"
             self.logger.error(e)
             raise SyncInventoryError(e)
 
@@ -388,7 +417,7 @@ class PhysicalDevice:
     def _zeroize_cf(self):
         """Sets the hostID custom field in NetBox to zero,
         effectively destroying the link"""
-        self.nb.custom_fields[self.config["device_cf"]] = None
+        self.nb.custom_fields[self.device_cf] = None
         self.nb.save()
 
     def _zabbix_hostname_exists(self):
@@ -597,7 +626,7 @@ class PhysicalDevice:
                 self.logger.error(msg)
                 raise SyncExternalError(msg) from e
             # Set NetBox custom field to hostID value.
-            self.nb.custom_fields[self.config["device_cf"]] = int(self.zabbix_id)
+            self.nb.custom_fields[self.device_cf] = int(self.zabbix_id)
             self.nb.save()
             msg = f"Host {self.name}: Created host in Zabbix. (ID:{self.zabbix_id})"
             self.logger.info(msg)

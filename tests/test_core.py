@@ -96,6 +96,7 @@ class MockNetboxDevice(MockRecord):
         config_context=None,
         site=None,
         primary_ip=None,
+        oob_ip=None,
         virtual_chassis=None,
         device_type=None,
         tenant=None,
@@ -113,6 +114,7 @@ class MockNetboxDevice(MockRecord):
         self.status.value = status_label.lower()
         self.custom_fields = {
             "zabbix_hostid": zabbix_hostid,
+            "zabbix_oob_hostid": None,
             "zabbix_template": "TestTemplate",
         }
         self.config_context = config_context or {}
@@ -150,6 +152,9 @@ class MockNetboxDevice(MockRecord):
             self.primary_ip.address = "192.168.1.1/24"
         else:
             self.primary_ip = primary_ip
+
+        if oob_ip is not None:
+            self.oob_ip = oob_ip
 
         self.primary_ip4 = self.primary_ip
         self.primary_ip6 = None
@@ -1010,6 +1015,149 @@ class TestDeviceHandeling(unittest.TestCase):
         self.assertEqual(create_call_kwargs["templates"], [{"templateid": "2"}])
         # Verify the custom field template was NOT used
         self.assertNotIn({"templateid": "1"}, create_call_kwargs["templates"])
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_config_context_oob_creates_primary_and_oob(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A zabbix.oob config creates a separate host for oob_ip."""
+        oob_ip = MagicMock()
+        oob_ip.address = "10.0.0.10/24"
+        device = MockNetboxDevice(
+            device_id=1,
+            name="vmhost1",
+            oob_ip=oob_ip,
+            config_context={
+                "zabbix": {
+                    "templates": ["PrimaryTemplate"],
+                    "interface_type": 1,
+                    "oob": {
+                        "name_prefix": "drac-",
+                        "templates": ["OobTemplate"],
+                        "interface_type": 2,
+                        "snmp": {"version": 2, "community": "public"},
+                    },
+                }
+            },
+        )
+
+        mock_netbox = self._setup_netbox_mock(mock_api)
+        mock_netbox.dcim.devices.filter.return_value = [device]
+
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.template.get.return_value = [
+            {"templateid": "1", "name": "PrimaryTemplate"},
+            {"templateid": "2", "name": "OobTemplate"},
+        ]
+
+        syncer = Sync()
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(mock_zabbix.host.create.call_count, 2)
+        create_calls = mock_zabbix.host.create.call_args_list
+        self.assertEqual(create_calls[0].kwargs["host"], "vmhost1")
+        self.assertEqual(create_calls[0].kwargs["interfaces"][0]["ip"], "192.168.1.1")
+        self.assertEqual(create_calls[0].kwargs["templates"], [{"templateid": "1"}])
+        self.assertEqual(create_calls[0].kwargs["interfaces"][0]["type"], 1)
+        self.assertEqual(create_calls[1].kwargs["host"], "drac-vmhost1")
+        self.assertEqual(create_calls[1].kwargs["interfaces"][0]["ip"], "10.0.0.10")
+        self.assertEqual(create_calls[1].kwargs["templates"], [{"templateid": "2"}])
+        self.assertEqual(create_calls[1].kwargs["interfaces"][0]["type"], 2)
+        self.assertEqual(
+            create_calls[1].kwargs["interfaces"][0]["details"]["community"], "public"
+        )
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
+        self.assertEqual(device.custom_fields["zabbix_oob_hostid"], 1)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_config_context_oob_skip_missing_oob_ip(self, mock_api, mock_zabbix_api):
+        """A missing oob_ip skips only the OOB import."""
+        device = MockNetboxDevice(
+            device_id=1,
+            name="Router01",
+            config_context={
+                "zabbix": {
+                    "templates": ["PrimaryTemplate"],
+                    "oob": {"templates": ["OobTemplate"]},
+                }
+            },
+        )
+
+        mock_netbox = self._setup_netbox_mock(mock_api)
+        mock_netbox.dcim.devices.filter.return_value = [device]
+
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.template.get.return_value = [
+            {"templateid": "1", "name": "PrimaryTemplate"},
+            {"templateid": "2", "name": "OobTemplate"},
+        ]
+
+        syncer = Sync()
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_called_once()
+        self.assertEqual(mock_zabbix.host.create.call_args.kwargs["host"], "Router01")
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_config_context_oob_default_suffix(self, mock_api, mock_zabbix_api):
+        """An OOB import defaults to a -oob hostname suffix."""
+        oob_ip = MagicMock()
+        oob_ip.address = "10.0.0.10/24"
+        device = MockNetboxDevice(
+            device_id=1,
+            name="Router01",
+            oob_ip=oob_ip,
+            config_context={
+                "zabbix": {
+                    "templates": ["PrimaryTemplate"],
+                    "oob": {"templates": ["OobTemplate"]},
+                }
+            },
+        )
+
+        mock_netbox = self._setup_netbox_mock(mock_api)
+        mock_netbox.dcim.devices.filter.return_value = [device]
+
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.template.get.return_value = [
+            {"templateid": "1", "name": "PrimaryTemplate"},
+            {"templateid": "2", "name": "OobTemplate"},
+        ]
+
+        syncer = Sync()
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(mock_zabbix.host.create.call_count, 2)
+        self.assertEqual(
+            mock_zabbix.host.create.call_args_list[1].kwargs["host"], "Router01-oob"
+        )
 
 
 class TestDeviceStatusHandling(unittest.TestCase):

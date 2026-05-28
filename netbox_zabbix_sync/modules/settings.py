@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "templates_config_context_overrule": False,
     "template_cf": "zabbix_template",
     "device_cf": "zabbix_hostid",
+    "oob_device_cf": "zabbix_oob_hostid",
     "proxy_cf": False,
     "proxy_group_cf": False,
     "clustering": False,

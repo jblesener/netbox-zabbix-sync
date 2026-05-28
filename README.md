@@ -111,6 +111,18 @@ the template information then the zabbix_template field is not required):
 * Object: dcim > device
 ```
 
+If you use config-context split imports for OOB management, also create an OOB
+host ID custom field. The field name is configurable with `oob_device_cf` and
+defaults to `zabbix_oob_hostid`.
+
+```
+* Type: Integer
+* Name: zabbix_oob_hostid
+* Required: False
+* Default: null
+* Object: dcim > device
+```
+
 ```
 * Type: Text
 * Name: zabbix_template
@@ -122,7 +134,7 @@ the template information then the zabbix_template field is not required):
 You can make the `zabbix_hostid` field hidden or read-only to prevent human
 intervention.
 
-This is optional, but there may be cases where you want to leave it 
+This is optional, but there may be cases where you want to leave it
 read-write in the UI. For example to manually change or clear the ID and re-run a sync.
 
 ## Virtual Machine (VM) Syncing
@@ -205,8 +217,7 @@ You can also provice a list of groups like so:
 
 ```python
 hostgroup_format = ["region/site_group/site", "role", "tenant_group/tenant"]
-``` 
-
+```
 
 **Group traversal**
 
@@ -216,7 +227,7 @@ in `config.py` the script will render a full region path of all parent regions
 for the hostgroup name. `traverse_site_groups` controls the same behaviour for
 site_groups.
 
-**Hardcoded text** 
+**Hardcoded text**
 
 You can add hardcoded text in the hostgroup format by using quotes, this will
 insert the literal text:
@@ -311,7 +322,7 @@ To enable this functionality, enable the following setting in your configuration
 
 `extended_site_properties = True`
 
-Keep in mind that enabling this option will increase the number of API calls to your NetBox instance, 
+Keep in mind that enabling this option will increase the number of API calls to your NetBox instance,
 this might impact performance on large syncs.
 
 ### Device status
@@ -404,6 +415,42 @@ template(s) will take priority over the device type custom field template.
 templates_config_context_overrule = True
 ```
 
+### OOB device import
+
+By default one NetBox device is imported as one Zabbix host using the device's
+`primary_ip`. You can also import the device's `oob_ip` as a second Zabbix host
+by adding an `oob` node under `zabbix` in config context.
+
+The normal `zabbix` node continues to configure the primary host. The nested
+`zabbix.oob` node configures the OOB host and can use the same fields as the
+primary host, such as `templates`, `interface_type`, `interface_port`, `snmp`,
+`proxy`, `proxy_group`, `tags`, `usermacros`, and `description`.
+
+The OOB host name is derived from the primary host name. Use `name_prefix` or
+`name_suffix` in `zabbix.oob`; if neither is set, the suffix `-oob` is used. The
+OOB host ID is stored in the custom field configured by `oob_device_cf`, which
+defaults to `zabbix_oob_hostid`.
+
+```json
+{
+    "zabbix": {
+        "templates": ["Template Module ICMP Ping"],
+        "oob": {
+            "name_prefix": "drac-",
+            "templates": ["Template Net Network Generic Device SNMP"],
+            "interface_type": 2,
+            "snmp": {
+                "version": 2,
+                "community": "{$SNMP_COMMUNITY}"
+            }
+        }
+    }
+}
+```
+
+With a NetBox device named `vmhost1`, this example creates an OOB Zabbix
+host named `drac-vmhost1`.
+
 ### Tags
 
 This script can sync host tags to your Zabbix hosts for use in filtering,
@@ -484,10 +531,9 @@ device_tag_map = {}
 vm_tag_map = {}
 ```
 
-
 ### Usermacros
 
-You can choose to use NetBox as a source for Host usermacros by 
+You can choose to use NetBox as a source for Host usermacros by
 enabling the following option in the configuration file:
 
 ```python
@@ -505,9 +551,9 @@ There are two NetBox sources that can be used to populate usermacros:
 
 #### Config context
 
-By defining a dictionary `usermacros` within the `zabbix` key in 
-config context, you can dynamically assign usermacro values based on 
-anything that you can target based on 
+By defining a dictionary `usermacros` within the `zabbix` key in
+config context, you can dynamically assign usermacro values based on
+anything that you can target based on
 [config contexts](https://netboxlabs.com/docs/netbox/en/stable/features/context-data/)
 within NetBox.
 
@@ -549,7 +595,7 @@ Examples:
 ```
 
 Please be aware that secret usermacros are only synced _once_ by default.
-This is the default behavior because Zabbix API won't return the value of 
+This is the default behavior because Zabbix API won't return the value of
 secrets so the script cannot compare the values with those set in NetBox.
 
 If you update a secret usermacro value, just remove the value from the host
@@ -564,9 +610,9 @@ usermacro_sync = "full"
 This will force a full usermacro sync on every run on hosts that have secret usermacros set.
 That way, you will know for sure the secret values are always up to date.
 
-Keep in mind that NetBox will show your secrets in plain text. 
+Keep in mind that NetBox will show your secrets in plain text.
 If true secrecy is required, consider switching to
-[vault](https://www.zabbix.com/documentation/current/en/manual/config/macros/secret_macros#vault-secret) 
+[vault](https://www.zabbix.com/documentation/current/en/manual/config/macros/secret_macros#vault-secret)
 usermacros.
 
 #### Netbox Fields
@@ -588,8 +634,6 @@ vm_usermacro_map = {"memory": "{$TOTAL_MEMORY}",
                     "url": "{$NB_URL}",
                     "id": "{$NB_ID}"}
 ```
-
-
 
 ## Permissions
 
@@ -638,6 +682,7 @@ python3 netbox_zabbix_sync.py
 ### Zabbix proxy
 
 #### Config Context
+
 You can set the proxy for a device using the `proxy` key in config context.
 
 ```json
@@ -681,17 +726,17 @@ omitting the proxy_group value.
 
 #### Custom Field
 
-Alternatively, you can use a custom field for assigning a device or VM to 
-a Zabbix proxy or proxy group. The custom fields can be assigned to both 
-Devices and VMs. 
+Alternatively, you can use a custom field for assigning a device or VM to
+a Zabbix proxy or proxy group. The custom fields can be assigned to both
+Devices and VMs.
 
 You can also assign these custom fields to a site to allow all devices/VMs
 in that site to be configured with the same proxy or proxy group.
 In order for this to work, `extended_site_properties` needs to be enabled in
 the configuration as well.
 
-To use the custom fields for proxy configuration, configure one or both 
-of the following settings in the configuration file with the actual names of your 
+To use the custom fields for proxy configuration, configure one or both
+of the following settings in the configuration file with the actual names of your
 custom fields:
 
 ```python
@@ -699,9 +744,9 @@ proxy_cf = "zabbix_proxy"
 proxy_group_cf = "zabbix_proxy_group"
 ```
 
-As with config context proxy configuration, proxy group will take precedence over 
-standalone proxy when configured. 
-Proxy settings configured on the device or VM will in their turn take precedence 
+As with config context proxy configuration, proxy group will take precedence over
+standalone proxy when configured.
+Proxy settings configured on the device or VM will in their turn take precedence
 over any site configuration.
 
 If the custom fields have no value but the proxy or proxy group is configured in config context,
@@ -790,7 +835,3 @@ since the data in NetBox is plain-text.
 > **_NOTE:_** Not all SNMP data is required for a working configuration.
 > [The following parameters are allowed](https://www.zabbix.com/documentation/current/manual/api/reference/hostinterface/object#details_tag "The following parameters are allowed") but
 > are not all required, depending on your environment.
-
-
-
-

@@ -1,6 +1,7 @@
 """Core component of the sync process"""
 
 import ssl
+from contextlib import suppress
 from os import environ
 from pprint import pformat
 from typing import Any
@@ -10,7 +11,7 @@ from pynetbox.core.query import RequestError as NetBoxRequestError
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from zabbix_utils import APIRequestError, ProcessingError, ZabbixAPI
 
-from netbox_zabbix_sync.modules.device import PhysicalDevice
+from netbox_zabbix_sync.modules.device import NetboxDeviceImport, PhysicalDevice
 from netbox_zabbix_sync.modules.exceptions import SyncError
 from netbox_zabbix_sync.modules.logging import get_logger
 from netbox_zabbix_sync.modules.settings import DEFAULT_CONFIG
@@ -61,6 +62,168 @@ class Sync:
         if method_filter:
             combined_filter.update(method_filter)
         return combined_filter
+
+    def _build_oob_hostname(self, primary_name: str, oob_context: dict[str, Any]):
+        """Build the OOB host name from the primary host name."""
+        prefix = oob_context.get("name_prefix", "")
+        suffix = oob_context.get("name_suffix", "")
+        if not prefix and not suffix:
+            suffix = "-oob"
+        return f"{prefix}{primary_name}{suffix}"
+
+    def _get_device_imports(self, nb_device):
+        """Return effective NetBox objects/configs for primary and optional OOB imports."""
+        zabbix_context = nb_device.config_context.get("zabbix", {})
+        primary_config = self.config
+        if "templates" in zabbix_context:
+            primary_config = self.config.copy()
+            primary_config["templates_config_context_overrule"] = True
+        imports = [(nb_device, primary_config, False)]
+        oob_context = zabbix_context.get("oob")
+        if oob_context is None:
+            return imports
+        if not isinstance(oob_context, dict):
+            logger.warning(
+                "Host %s: zabbix.oob is not a dictionary, skipping OOB import.",
+                nb_device.name,
+            )
+            return imports
+
+        if not nb_device.oob_ip:
+            logger.warning(
+                "Host %s: zabbix.oob is configured but oob_ip is missing, skipping OOB import.",
+                nb_device.name,
+            )
+            return imports
+
+        metadata_keys = {"name_prefix", "name_suffix"}
+        effective_context = {
+            key: value for key, value in oob_context.items() if key not in metadata_keys
+        }
+        effective_config = self.config.copy()
+        effective_config["device_cf"] = self.config["oob_device_cf"]
+        if "templates" in effective_context:
+            effective_config["templates_config_context_overrule"] = True
+        imports.append(
+            (
+                NetboxDeviceImport(
+                    nb_device,
+                    self._build_oob_hostname(nb_device.name, oob_context),
+                    nb_device.oob_ip,
+                    effective_context,
+                ),
+                effective_config,
+                True,
+            )
+        )
+        return imports
+
+    def _process_device(
+        self,
+        nb_device,
+        device_config,
+        netbox_journals,
+        netbox_site_groups,
+        netbox_regions,
+        zabbix_groups,
+        zabbix_templates,
+        zabbix_proxy_list,
+        split_import=False,
+    ):
+        """Run the physical device sync pipeline for one effective device import."""
+        device = PhysicalDevice(
+            nb_device,
+            self.zabbix,
+            netbox_journals,
+            self.nb_version,
+            device_config["create_journal"],
+            logger,
+            config=device_config,
+        )
+        logger.debug("Host %s: Started operations on device.", device.name)
+        device.set_template(
+            device_config["templates_config_context"],
+            device_config["templates_config_context_overrule"],
+        )
+        # Check if a valid template has been found for this device.
+        if not device.zbx_template_names:
+            return True
+        device.set_hostgroup(
+            device_config["hostgroup_format"], netbox_site_groups, netbox_regions
+        )
+        # Check if a valid hostgroup has been found for this device.
+        if not device.hostgroups:
+            logger.warning(
+                "Host %s: has no valid hostgroups, Skipping this host...",
+                device.name,
+            )
+            return True
+        if device_config["extended_site_properties"] and nb_device.site:
+            logger.debug("Host %s: extending site information.", device.name)
+            nb_device.site.full_details()
+        if device_config["extended_virtual_chassis"] and nb_device.virtual_chassis:
+            logger.debug("Host %s: extending virtual chassis information.", device.name)
+            nb_device.virtual_chassis.full_details()
+            if "members" in dict(nb_device.virtual_chassis):
+                for member in nb_device.virtual_chassis.members:
+                    member.full_details()
+
+        logger.debug("Host %s NetBox data: %s", device.name, pformat(dict(nb_device)))
+
+        device.set_inventory(nb_device)
+        device.set_usermacros()
+        device.set_tags()
+
+        # Split imports require explicit unique hostnames and must not be collapsed
+        # into a virtual chassis hostname.
+        if not split_import and device.is_cluster() and device_config["clustering"]:
+            # Check if device is primary or secondary
+            if device.promote_primary_device():
+                logger.info("Host %s: is part of cluster and primary.", device.name)
+            else:
+                # Device is secondary in cluster.
+                # Don't continue with this device.
+                logger.info(
+                    "Host %s: Is part of cluster but not primary. Skipping this host...",
+                    device.name,
+                )
+                return True
+        # Checks if device is in cleanup state
+        if device.status in device_config["zabbix_device_removal"]:
+            if device.zabbix_id:
+                # Delete device from Zabbix and remove hostID from NetBox.
+                device.cleanup()
+                logger.info("Host %s: cleanup complete", device.name)
+                return True
+            # Device has been added to NetBox but is not in Activate state
+            logger.info(
+                "Host %s: Skipping since this host is not in the active state.",
+                device.name,
+            )
+            return True
+        # Check if the device is in the disabled state
+        if device.status in device_config["zabbix_device_disable"]:
+            device.zabbix_state = 1
+        # Add hostgroup is config is set
+        if device_config["create_hostgroups"]:
+            # Create new hostgroup. Potentially multiple groups if nested
+            hostgroups = device.create_zbx_hostgroup(zabbix_groups)
+            # go through all newly created hostgroups
+            for group in hostgroups:
+                # Add new hostgroups to zabbix group list
+                zabbix_groups.append(group)
+        # Check if device is already in Zabbix
+        if device.zabbix_id:
+            device.consistency_check(
+                zabbix_groups,
+                zabbix_templates,
+                zabbix_proxy_list,
+                device_config["full_proxy_sync"],
+                device_config["create_hostgroups"],
+            )
+            return True
+        # Add device to Zabbix
+        device.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
 
     def _validate_netbox_token(self, token: str, nb_version: str) -> bool:
         """Validate the format of the NetBox token based on the NetBox version.
@@ -334,114 +497,19 @@ class Sync:
                 pass
 
         for nb_device in netbox_devices:
-            try:
-                # Set device instance set data such as hostgroup and template information.
-                device = PhysicalDevice(
-                    nb_device,
-                    self.zabbix,
-                    netbox_journals,
-                    self.nb_version,
-                    self.config["create_journal"],
-                    logger,
-                    config=self.config,
-                )
-                logger.debug("Host %s: Started operations on device.", device.name)
-                device.set_template(
-                    self.config["templates_config_context"],
-                    self.config["templates_config_context_overrule"],
-                )
-                # Check if a valid template has been found for this VM.
-                if not device.zbx_template_names:
-                    continue
-                device.set_hostgroup(
-                    self.config["hostgroup_format"], netbox_site_groups, netbox_regions
-                )
-                # Check if a valid hostgroup has been found for this VM.
-                if not device.hostgroups:
-                    logger.warning(
-                        "Host %s: has no valid hostgroups, Skipping this host...",
-                        device.name,
-                    )
-                    continue
-                if self.config["extended_site_properties"] and nb_device.site:
-                    logger.debug("Host %s: extending site information.", device.name)
-                    nb_device.site.full_details()
-                if (
-                    self.config["extended_virtual_chassis"]
-                    and nb_device.virtual_chassis
-                ):
-                    logger.debug(
-                        "Host %s: extending virtual chassis information.", device.name
-                    )
-                    nb_device.virtual_chassis.full_details()
-                    if "members" in dict(nb_device.virtual_chassis):
-                        for member in nb_device.virtual_chassis.members:
-                            member.full_details()
-
-                logger.debug(
-                    "Host %s NetBox data: %s", device.name, pformat(dict(nb_device))
-                )
-
-                device.set_inventory(nb_device)
-                device.set_usermacros()
-                device.set_tags()
-
-                # Checks if device is part of cluster.
-                # Requires clustering variable
-                if device.is_cluster() and self.config["clustering"]:
-                    # Check if device is primary or secondary
-                    if device.promote_primary_device():
-                        logger.info(
-                            "Host %s: is part of cluster and primary.", device.name
-                        )
-                    else:
-                        # Device is secondary in cluster.
-                        # Don't continue with this device.
-                        logger.info(
-                            "Host %s: Is part of cluster but not primary. Skipping this host...",
-                            device.name,
-                        )
-                        continue
-                # Checks if device is in cleanup state
-                if device.status in self.config["zabbix_device_removal"]:
-                    if device.zabbix_id:
-                        # Delete device from Zabbix
-                        # and remove hostID from NetBox.
-                        device.cleanup()
-                        logger.info("Host %s: cleanup complete", device.name)
-                        continue
-                    # Device has been added to NetBox
-                    # but is not in Activate state
-                    logger.info(
-                        "Host %s: Skipping since this host is not in the active state.",
-                        device.name,
-                    )
-                    continue
-                # Check if the device is in the disabled state
-                if device.status in self.config["zabbix_device_disable"]:
-                    device.zabbix_state = 1
-                # Add hostgroup is config is set
-                if self.config["create_hostgroups"]:
-                    # Create new hostgroup. Potentially multiple groups if nested
-                    hostgroups = device.create_zbx_hostgroup(zabbix_groups)
-                    # go through all newly created hostgroups
-                    for group in hostgroups:
-                        # Add new hostgroups to zabbix group list
-                        zabbix_groups.append(group)
-                # Check if device is already in Zabbix
-                if device.zabbix_id:
-                    device.consistency_check(
+            for device_import, device_config, split_import in self._get_device_imports(
+                nb_device
+            ):
+                with suppress(SyncError):
+                    self._process_device(
+                        device_import,
+                        device_config,
+                        netbox_journals,
+                        netbox_site_groups,
+                        netbox_regions,
                         zabbix_groups,
                         zabbix_templates,
                         zabbix_proxy_list,
-                        self.config["full_proxy_sync"],
-                        self.config["create_hostgroups"],
+                        split_import=split_import,
                     )
-                    continue
-                # Add device to Zabbix
-                device.create_in_zabbix(
-                    zabbix_groups, zabbix_templates, zabbix_proxy_list
-                )
-            except SyncError:
-                pass
         return True

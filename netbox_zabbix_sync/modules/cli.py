@@ -46,6 +46,11 @@ _STR_ARGS = [
     ("template_cf", "NetBox custom field name for the Zabbix template.", "FIELD"),
     ("device_cf", "NetBox custom field name for the Zabbix host ID.", "FIELD"),
     (
+        "oob_device_cf",
+        "NetBox custom field name for the split-import OOB Zabbix host ID.",
+        "FIELD",
+    ),
+    (
         "hostgroup_format",
         "Hostgroup path pattern for physical devices (e.g. site/manufacturer/role).",
         "PATTERN",
