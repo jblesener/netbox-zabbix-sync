@@ -5,7 +5,7 @@ Device specific handeling for NetBox to Zabbix
 from copy import deepcopy
 from logging import getLogger
 from operator import itemgetter
-from re import search
+from re import fullmatch
 from typing import Any
 
 from pynetbox import RequestError as NetboxRequestError
@@ -143,23 +143,30 @@ class PhysicalDevice:
             raise SyncInventoryError(e)
 
         # Validate hostname format.
-        odd_character_list = ["ä", "ö", "ü", "Ä", "Ö", "Ü", "ß"]
         self.use_visible_name = False
-        if any(letter in self.name for letter in odd_character_list) or bool(
-            search("[\u0400-\u04ff]", self.name)
-        ):
+        if not self._hostname_supported_by_zabbix(self.name):
             self.name = f"NETBOX_ID{self.id}"
             self.visible_name = self.nb.name
             self.use_visible_name = True
             self.logger.info(
-                "Host %s contains special characters."
-                "Using %s as name for the NetBox object and using %s as visible name in Zabbix.",
+                "Host %s contains characters unsupported by Zabbix technical host names. "
+                "Using %s as name for the NetBox object and %s as visible name in Zabbix.",
                 self.visible_name,
                 self.name,
                 self.visible_name,
             )
-        else:
-            pass
+
+    @staticmethod
+    def _hostname_supported_by_zabbix(hostname: str) -> bool:
+        """
+        Check whether `host` is valid for Zabbix technical host name.
+
+        Allowed characters: alphanumerics, spaces, dots, dashes, underscores.
+        Leading and trailing spaces are not allowed.
+        """
+        if hostname != hostname.strip():
+            return False
+        return bool(fullmatch(r"[A-Za-z0-9._ -]+", hostname))
 
     def set_hostgroup(self, hg_format, nb_site_groups, nb_regions):
         """Set the hostgroup for this device"""

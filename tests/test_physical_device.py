@@ -65,32 +65,43 @@ class TestPhysicalDevice(unittest.TestCase):
         self.assertEqual(self.device.ip, "192.168.1.1")
         self.assertEqual(self.device.cidr, "192.168.1.1/24")
 
-    def test_set_basics_with_special_characters(self):
-        """Test _setBasics when device name contains special characters."""
-        # Set name with special characters that
-        # will actually trigger the special character detection
-        self.mock_nb_device.name = "test-devïce"
+    def test_set_basics_with_unsupported_zabbix_hostname_characters(self):
+        """Test _setBasics when hostname has chars unsupported by Zabbix host field."""
+        unsupported_names = [
+            "test-devïce",
+            "test(device)",
+            " test-device",
+            "test-device ",
+        ]
+        for name in unsupported_names:
+            with self.subTest(name=name):
+                self.mock_nb_device.name = name
+                device = PhysicalDevice(
+                    self.mock_nb_device,
+                    self.mock_zabbix,
+                    self.mock_nb_journal,
+                    "3.0",
+                    logger=self.mock_logger,
+                    config={"device_cf": "zabbix_hostid"},
+                )
+                self.assertEqual(device.name, f"NETBOX_ID{self.mock_nb_device.id}")
+                self.assertEqual(device.visible_name, name)
+                self.assertTrue(device.use_visible_name)
 
-        # We need to patch the search function to simulate finding special characters
-        with patch("netbox_zabbix_sync.modules.device.search") as mock_search:
-            # Make the search function return True to simulate special characters
-            mock_search.return_value = True
-
-            device = PhysicalDevice(
-                self.mock_nb_device,
-                self.mock_zabbix,
-                self.mock_nb_journal,
-                "3.0",
-                logger=self.mock_logger,
-                config={"device_cf": "zabbix_hostid"},
-            )
-
-        # With the mocked search function, the name should be changed to NETBOX_ID format
-        self.assertEqual(device.name, f"NETBOX_ID{self.mock_nb_device.id}")
-        # And visible_name should be set to the original name
-        self.assertEqual(device.visible_name, "test-devïce")
-        # use_visible_name flag should be set
-        self.assertTrue(device.use_visible_name)
+    def test_set_basics_allows_spaces_in_hostname(self):
+        """Test _setBasics keeps technical hostnames that contain spaces."""
+        self.mock_nb_device.name = "test device 01"
+        device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={"device_cf": "zabbix_hostid"},
+        )
+        self.assertEqual(device.name, "test device 01")
+        self.assertIsNone(device.visible_name)
+        self.assertFalse(device.use_visible_name)
 
     def test_get_templates_context(self):
         """Test get_templates_context with valid config."""
