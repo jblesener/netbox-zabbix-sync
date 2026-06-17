@@ -173,6 +173,7 @@ class Sync:
         device.set_inventory(nb_device)
         device.set_usermacros()
         device.set_tags()
+        device.set_tls()
 
         # Split imports require explicit unique hostnames and must not be collapsed
         # into a virtual chassis hostname.
@@ -457,6 +458,7 @@ class Sync:
                 vm.set_inventory(nb_vm)
                 vm.set_usermacros()
                 vm.set_tags()
+                vm.set_tls()
                 logger.debug(
                     "Host %s NetBox data: %s",
                     vm.name,

@@ -174,3 +174,29 @@ device_tag_map = {"site/name": "site",
 vm_tag_map = {"site/name": "site",
               "cluster/name": "cluster",
               "platform/name": "target"}
+
+# To sync the Zabbix host encryption (TLS) settings, set tls_sync to True.
+# While False, no encryption settings are pushed or reconciled, leaving the
+# Zabbix defaults (no encryption) untouched.
+tls_sync = False
+
+# The values below are the global defaults. They can be overruled per host
+# through the NetBox config context under the "zabbix" key, for example:
+#   {"zabbix": {"tls_connect": "cert", "tls_accept": ["cert"],
+#               "tls_issuer": "CN=My CA", "tls_subject": "CN=host1.example.com"}}
+
+# tls_connect: how Zabbix connects to the host. One of: none, psk, cert.
+tls_connect = "none"
+
+# tls_accept: which connections the host accepts. A list of: none, psk, cert.
+# Multiple modes can be combined, e.g. ["psk", "cert"].
+tls_accept = ["none"]
+
+# Certificate issuer and subject (used with the 'cert' mode, both optional).
+tls_issuer = ""
+tls_subject = ""
+
+# PSK identity and key (required when the 'psk' mode is used).
+# tls_psk is a secret and is masked in log output.
+tls_psk_identity = ""
+tls_psk = ""

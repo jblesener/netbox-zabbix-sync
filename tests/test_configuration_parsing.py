@@ -26,6 +26,14 @@ def test_load_config_defaults():
         assert config == DEFAULT_CONFIG
         assert config["templates_config_context"] is False
         assert config["create_hostgroups"] is True
+        # TLS settings default to disabled / no encryption
+        assert config["tls_sync"] is False
+        assert config["tls_connect"] == "none"
+        assert config["tls_accept"] == ["none"]
+        assert config["tls_issuer"] == ""
+        assert config["tls_subject"] == ""
+        assert config["tls_psk_identity"] == ""
+        assert config["tls_psk"] == ""
 
 
 def test_load_config_file():

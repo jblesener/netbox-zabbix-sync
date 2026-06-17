@@ -229,6 +229,10 @@ def sanatize_log_output(data):
     if not isinstance(data, dict):
         return data
     sanitized_data = data.copy()
+    # Mask the TLS pre-shared key (and its identity) as these are secrets.
+    for tls_secret in ("tls_psk", "tls_psk_identity"):
+        if tls_secret in sanitized_data:
+            sanitized_data[tls_secret] = "********"
     # Check if there are any sensitive macros defined in the data
     if "macros" in data:
         for macro in sanitized_data["macros"]:

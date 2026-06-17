@@ -666,6 +666,69 @@ vm_usermacro_map = {"memory": "{$TOTAL_MEMORY}",
                     "id": "{$NB_ID}"}
 ```
 
+### TLS encryption
+
+You can sync the Zabbix host encryption (TLS) settings so that synced hosts use
+certificate or PSK based encryption instead of the default "No encryption".
+
+Syncing is disabled by default. Enable it in the config file:
+
+```python
+tls_sync = True
+```
+
+While `tls_sync` is `False`, no encryption settings are pushed or reconciled and
+the Zabbix defaults are left untouched.
+
+The settings can be defined globally in the config file and overruled per host
+through the NetBox config context. The available settings are:
+
+- `tls_connect`: how Zabbix connects to the host. One of `none`, `psk`, `cert`.
+- `tls_accept`: which connections the host accepts. A list combining `none`,
+  `psk` and/or `cert`.
+- `tls_issuer`, `tls_subject`: certificate issuer/subject (`cert` mode, optional).
+- `tls_psk_identity`, `tls_psk`: PSK identity and key (required for `psk` mode).
+  `tls_psk` is a secret and is masked in the log output.
+
+#### Global config
+
+```python
+tls_sync = True
+tls_connect = "cert"
+tls_accept = ["cert"]
+tls_issuer = "CN=My CA"
+tls_subject = "CN=host1.example.com"
+```
+
+#### Config context
+
+Per host, the global defaults can be overruled by adding the matching keys under
+the `zabbix` key in the NetBox config context:
+
+```json
+{
+    "zabbix": {
+        "tls_connect": "cert",
+        "tls_accept": ["cert"],
+        "tls_issuer": "CN=My CA",
+        "tls_subject": "CN=host1.example.com"
+    }
+}
+```
+
+A PSK example:
+
+```json
+{
+    "zabbix": {
+        "tls_connect": "psk",
+        "tls_accept": ["psk"],
+        "tls_psk_identity": "PSK 001",
+        "tls_psk": "16-or-more-hex-character-key"
+    }
+}
+```
+
 ## Permissions
 
 ### NetBox

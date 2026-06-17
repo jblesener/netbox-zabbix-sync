@@ -30,6 +30,10 @@ from netbox_zabbix_sync.modules.tools import (
 )
 from netbox_zabbix_sync.modules.usermacros import ZabbixUsermacros
 
+# Zabbix encryption modes mapped to their API integer values.
+# tls_connect uses a single value; tls_accept is an OR-summed bitmask.
+TLS_MODES = {"none": 1, "psk": 2, "cert": 4}
+
 
 class NetboxDeviceImport:
     """
@@ -100,6 +104,7 @@ class PhysicalDevice:
         self.inventory = {}
         self.usermacros = []
         self.tags = {}
+        self.tls = {}
         self.logger = logger if logger else getLogger(__name__)
         self._set_basics()
 
@@ -581,6 +586,89 @@ class PhysicalDevice:
         self.tags = tags.generate()
         return True
 
+    def _tls_config_value(self, key):
+        """
+        Resolves a single TLS setting: the global config.py default is used
+        unless the NetBox config context overrides it under the 'zabbix' key.
+        """
+        value = self.config[key]
+        if (
+            "zabbix" in self.config_context
+            and key in self.config_context["zabbix"]
+        ):
+            value = self.config_context["zabbix"][key]
+        return value
+
+    def _tls_modes_to_bitmask(self, modes):
+        """
+        Translates one or more encryption mode names into a Zabbix bitmask.
+        Accepts a single string or a list of strings. Returns None on an
+        unknown mode name.
+        """
+        if isinstance(modes, str):
+            modes = [modes]
+        bitmask = 0
+        for mode in modes:
+            if mode not in TLS_MODES:
+                self.logger.warning(
+                    "Host %s: invalid TLS mode '%s'. Valid modes are: %s.",
+                    self.name,
+                    mode,
+                    ", ".join(TLS_MODES),
+                )
+                return None
+            bitmask |= TLS_MODES[mode]
+        return bitmask
+
+    def set_tls(self):
+        """
+        Sets the Zabbix encryption (TLS) configuration for this host.
+
+        Values come from the global config defaults and may be overruled per
+        host through the NetBox config context. Only the keys relevant to the
+        configured connect/accept modes are sent to Zabbix.
+        """
+        self.tls = {}
+        if not self.config["tls_sync"]:
+            return False
+
+        # Resolve and translate the connect (single) and accept (bitmask) modes.
+        connect = self._tls_modes_to_bitmask(self._tls_config_value("tls_connect"))
+        accept = self._tls_modes_to_bitmask(self._tls_config_value("tls_accept"))
+        if connect is None or accept is None:
+            return False
+
+        tls = {"tls_connect": connect, "tls_accept": accept}
+        uses_cert = bool((connect | accept) & TLS_MODES["cert"])
+        uses_psk = bool((connect | accept) & TLS_MODES["psk"])
+
+        # Certificate issuer/subject are optional even when cert is used.
+        if uses_cert:
+            issuer = self._tls_config_value("tls_issuer")
+            subject = self._tls_config_value("tls_subject")
+            if issuer:
+                tls["tls_issuer"] = issuer
+            if subject:
+                tls["tls_subject"] = subject
+
+        # PSK identity and key are mandatory whenever PSK is used.
+        if uses_psk:
+            identity = self._tls_config_value("tls_psk_identity")
+            psk = self._tls_config_value("tls_psk")
+            if not identity or not psk:
+                self.logger.error(
+                    "Host %s: PSK encryption requires both tls_psk_identity "
+                    "and tls_psk to be set. Skipping TLS configuration.",
+                    self.name,
+                )
+                self.tls = {}
+                return False
+            tls["tls_psk_identity"] = identity
+            tls["tls_psk"] = psk
+
+        self.tls = tls
+        return True
+
     def _set_proxy(self, proxy_list: list[dict[str, Any]]) -> bool:
         """
         Sets proxy or proxy group if this
@@ -695,6 +783,9 @@ class PhysicalDevice:
                 "macros": self.usermacros,
                 "tags": self.tags,
             }
+            # Add TLS / encryption settings when tls_sync is enabled.
+            # Empty when disabled, leaving Zabbix defaults untouched.
+            create_data.update(self.tls)
             # If a Zabbix proxy or Zabbix Proxy group has been defined
             if self.zbxproxy:
                 # If a lower version than 7 is used, we can assume that
@@ -972,6 +1063,22 @@ class PhysicalDevice:
             else:
                 self.logger.info("Host %s: Inventory OUT of sync.", self.name)
                 self.update_zabbix_host(inventory=self.inventory)
+
+        # Check host TLS / encryption settings
+        if self.config["tls_sync"] and self.tls:
+            # tls_psk is write-only and never returned by host.get, so it can't
+            # be compared. All other resolved keys are checked as strings.
+            tls_in_sync = all(
+                key == "tls_psk" or str(host.get(key, "")) == str(value)
+                for key, value in self.tls.items()
+            )
+            if tls_in_sync:
+                self.logger.debug("Host %s: TLS settings in-sync.", self.name)
+            else:
+                self.logger.info("Host %s: TLS settings OUT of sync.", self.name)
+                # self.tls carries tls_psk/tls_psk_identity when PSK is used,
+                # which Zabbix requires to be present on the update.
+                self.update_zabbix_host(**self.tls)
 
         # Check host usermacros
         if self.config["usermacro_sync"]:

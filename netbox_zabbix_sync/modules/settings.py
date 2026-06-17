@@ -90,6 +90,13 @@ DEFAULT_CONFIG = {
     },
     "description_dt_format": "%Y-%m-%d %H:%M:%S",
     "description": "static",
+    "tls_sync": False,
+    "tls_connect": "none",
+    "tls_accept": ["none"],
+    "tls_issuer": "",
+    "tls_subject": "",
+    "tls_psk_identity": "",
+    "tls_psk": "",
 }
 
 
