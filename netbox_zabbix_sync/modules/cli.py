@@ -13,6 +13,7 @@ _BOOL_ARGS = [
     ("create_hostgroups", "Enable hostgroup generation (requires Zabbix permissions)."),
     ("create_journal", "Create NetBox journal entries on changes."),
     ("sync_vms", "Enable virtual machine sync."),
+    ("sync_azure_subscriptions", "Enable Azure subscription sync from Tenants."),
     (
         "adopt_existing_hosts",
         "Adopt matching existing Zabbix hosts by name when NetBox host ID is empty.",
@@ -67,6 +68,34 @@ _STR_ARGS = [
         "vm_hostgroup_format",
         "Hostgroup path pattern for virtual machines (e.g. cluster_type/cluster/role).",
         "PATTERN",
+    ),
+    ("azure_tag", "NetBox tag used to select Azure Tenants.", "TAG"),
+    (
+        "azure_subscription_id_cf",
+        "Tenant custom field name for Azure subscription ID.",
+        "FIELD",
+    ),
+    (
+        "azure_tenant_id_cf",
+        "Tenant Group custom field name for Azure tenant ID.",
+        "FIELD",
+    ),
+    (
+        "azure_zabbix_hostid_cf",
+        "Tenant custom field name for the Zabbix host ID.",
+        "FIELD",
+    ),
+    ("azure_template", "Zabbix template name for Azure subscription hosts.", "NAME"),
+    ("azure_hostgroup", "Zabbix host group for Azure subscription hosts.", "GROUP"),
+    (
+        "azure_app_id_vault",
+        "Zabbix Vault macro reference for {$AZURE.APP.ID}.",
+        "PATH",
+    ),
+    (
+        "azure_password_vault",
+        "Zabbix Vault macro reference for {$AZURE.PASSWORD}.",
+        "PATH",
     ),
     (
         "adopt_scope",

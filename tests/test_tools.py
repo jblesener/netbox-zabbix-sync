@@ -5,12 +5,14 @@ def test_sanatize_log_output_secrets():
     data = {
         "macros": [
             {"macro": "{$SECRET}", "type": "1", "value": "supersecret"},
+            {"macro": "{$VAULT}", "type": "2", "value": "secret/path:key"},
             {"macro": "{$PLAIN}", "type": "0", "value": "notsecret"},
         ]
     }
     sanitized = sanatize_log_output(data)
     assert sanitized["macros"][0]["value"] == "********"
-    assert sanitized["macros"][1]["value"] == "notsecret"
+    assert sanitized["macros"][1]["value"] == "********"
+    assert sanitized["macros"][2]["value"] == "notsecret"
 
 
 def test_sanatize_log_output_interface_secrets():

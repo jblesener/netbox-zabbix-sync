@@ -153,6 +153,57 @@ Note that not all filtering capabilities and properties of devices are
 applicable to VM's and vice-versa. Check the NetBox API documentation to see
 which filtering options are available for each object type.
 
+## Azure Subscription Syncing
+
+Azure subscriptions can be synced from NetBox Tenants. The sync only
+processes Tenants with the configured Azure tag, which defaults to
+`azure`.
+
+Model each Azure subscription as a Tenant and set:
+
+```
+* Type: Integer
+* Name: zabbix_hostid
+* Required: False
+* Default: null
+* Object: tenancy > tenant
+```
+
+```
+* Type: Text
+* Name: azure_subscription_id
+* Required: True
+* Object: tenancy > tenant
+```
+
+The Tenant's Tenant Group represents the Azure management group/tenant
+containing the subscriptions. Set this custom field on that Tenant Group:
+
+```
+* Type: Text
+* Name: azure_tenant_id
+* Required: True
+* Object: tenancy > tenant group
+```
+
+Enable the feature and configure Zabbix Vault macro references for the service
+principal credentials:
+
+```python
+sync_azure_subscriptions = True
+azure_app_id_vault = "secret/azure:app_id"
+azure_password_vault = "secret/azure:password"
+```
+
+Each synced Tenant is created as a Zabbix host named after the Tenant,
+assigned to `Azure/Subscriptions`, linked to `Azure by HTTP`, and given
+these macros:
+
+- `{$AZURE.APP.ID}` from `azure_app_id_vault` as a Vault macro
+- `{$AZURE.PASSWORD}` from `azure_password_vault` as a Vault macro
+- `{$AZURE.SUBSCRIPTION.ID}` from `azure_subscription_id`
+- `{$AZURE.TENANT.ID}` from the Tenant Group's `azure_tenant_id`
+
 ## Config file
 
 ### Hostgroup

@@ -278,6 +278,42 @@ class MockNetboxVM(MockRecord):
         """Mock save method."""
 
 
+class MockNetboxTenant(MockRecord):
+    """Mock NetBox Tenant object."""
+
+    def __init__(
+        self,
+        tenant_id=1,
+        name="test-subscription",
+        zabbix_hostid=None,
+        subscription_id="sub-123",
+        azure_tenant_id="tenant-123",
+        group=None,
+        custom_fields=None,
+        tags=None,
+    ):
+        super().__init__(values={}, api=None, endpoint=None)
+        self.id = tenant_id
+        self.name = name
+        self.tags = tags or []
+        self.group = group
+        if self.group is None and azure_tenant_id is not None:
+            self.group = MagicMock()
+            self.group.name = "tenant-management-group"
+            self.group.custom_fields = {"azure_tenant_id": azure_tenant_id}
+        self.custom_fields = (
+            custom_fields
+            if custom_fields is not None
+            else {
+                "zabbix_hostid": zabbix_hostid,
+                "azure_subscription_id": subscription_id,
+            }
+        )
+
+    def save(self):
+        """Mock save method."""
+
+
 class TestNetboxTokenHandling(unittest.TestCase):
     """Test that sync properly handles NetBox token authentication."""
 
@@ -616,6 +652,208 @@ class TestSyncDeviceProcessing(unittest.TestCase):
 
         # Verify VirtualMachine was never called
         mock_virtual_machine.assert_not_called()
+
+
+class TestSyncAzureSubscriptions(unittest.TestCase):
+    """Test Azure subscription processing from NetBox Tenants."""
+
+    def _setup_netbox_mock(self, mock_api, tenants=None):
+        """Helper to setup a working NetBox mock."""
+        mock_netbox = MagicMock()
+        mock_api.return_value = mock_netbox
+        mock_netbox.version = "3.5"
+        mock_netbox.extras.custom_fields.filter.return_value = []
+        mock_netbox.dcim.devices.filter.return_value = []
+        mock_netbox.virtualization.virtual_machines.filter.return_value = []
+        mock_netbox.dcim.site_groups.all.return_value = []
+        mock_netbox.dcim.regions.all.return_value = []
+        mock_netbox.extras.journal_entries = MagicMock()
+        mock_netbox.tenancy.tenants.filter.return_value = tenants or []
+        return mock_netbox
+
+    def _setup_zabbix_mock(self, mock_zabbix_api, version="7.0"):
+        """Helper to setup a working Zabbix mock."""
+        mock_zabbix = MagicMock()
+        mock_zabbix_api.return_value = mock_zabbix
+        mock_zabbix.version = version
+        mock_zabbix.hostgroup.get.return_value = []
+        mock_zabbix.hostgroup.create.side_effect = [
+            {"groupids": ["10"]},
+            {"groupids": ["11"]},
+        ]
+        mock_zabbix.template.get.return_value = [
+            {"templateid": "20", "name": "Azure by HTTP"}
+        ]
+        mock_zabbix.proxy.get.return_value = []
+        mock_zabbix.proxygroup.get.return_value = []
+        mock_zabbix.host.get.return_value = []
+        mock_zabbix.host.create.return_value = {"hostids": ["30"]}
+        return mock_zabbix
+
+    def _sync_config(self, **overrides):
+        config = {
+            "sync_azure_subscriptions": True,
+            "azure_app_id_vault": "secret/azure:app_id",
+            "azure_password_vault": "secret/azure:password",
+        }
+        config.update(overrides)
+        return config
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_sync_azure_subscriptions_disabled_does_not_query_tenants(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Tenants are not queried unless Azure subscription sync is enabled."""
+        mock_netbox = self._setup_netbox_mock(mock_api)
+        self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync()
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_netbox.tenancy.tenants.filter.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_sync_azure_subscription_creates_zabbix_host(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A tagged Tenant creates an Azure by HTTP Zabbix host."""
+        tenant = MockNetboxTenant(name="prod-subscription")
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync(self._sync_config())
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_called_once()
+        create_kwargs = mock_zabbix.host.create.call_args.kwargs
+        self.assertEqual(create_kwargs["host"], "prod-subscription")
+        self.assertEqual(create_kwargs["interfaces"], [])
+        self.assertEqual(create_kwargs["groups"], [{"groupid": "10"}])
+        self.assertEqual(create_kwargs["templates"], [{"templateid": "20"}])
+        self.assertEqual(
+            create_kwargs["macros"],
+            [
+                {
+                    "macro": "{$AZURE.APP.ID}",
+                    "value": "secret/azure:app_id",
+                    "type": "2",
+                    "description": "",
+                },
+                {
+                    "macro": "{$AZURE.PASSWORD}",
+                    "value": "secret/azure:password",
+                    "type": "2",
+                    "description": "",
+                },
+                {
+                    "macro": "{$AZURE.SUBSCRIPTION.ID}",
+                    "value": "sub-123",
+                    "type": "0",
+                    "description": "",
+                },
+                {
+                    "macro": "{$AZURE.TENANT.ID}",
+                    "value": "tenant-123",
+                    "type": "0",
+                    "description": "",
+                },
+            ],
+        )
+        self.assertEqual(tenant.custom_fields["zabbix_hostid"], 30)
+        mock_zabbix.hostgroup.create.assert_any_call(name="Azure/Subscriptions")
+        mock_zabbix.hostgroup.create.assert_any_call(name="Azure")
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_sync_azure_subscription_updates_existing_macros(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A Tenant with a stored host ID reconciles the existing host."""
+        tenant = MockNetboxTenant(zabbix_hostid=42)
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.hostgroup.get.return_value = [
+            {"groupid": "10", "name": "Azure/Subscriptions"}
+        ]
+        mock_zabbix.host.get.return_value = [
+            {
+                "hostid": "42",
+                "host": "test-subscription",
+                "name": "test-subscription",
+                "parentTemplates": [{"templateid": "20"}],
+                "hostgroups": [{"groupid": "10"}],
+                "groups": [{"groupid": "10"}],
+                "interfaces": [],
+                "macros": [],
+            }
+        ]
+
+        syncer = Sync(self._sync_config())
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_called_once()
+        update_kwargs = mock_zabbix.host.update.call_args.kwargs
+        self.assertEqual(update_kwargs["hostid"], 42)
+        self.assertEqual(
+            [macro["macro"] for macro in update_kwargs["macros"]],
+            [
+                "{$AZURE.APP.ID}",
+                "{$AZURE.PASSWORD}",
+                "{$AZURE.SUBSCRIPTION.ID}",
+                "{$AZURE.TENANT.ID}",
+            ],
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_sync_azure_subscription_skips_missing_required_data(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A Tenant missing required Azure data is skipped."""
+        tenant = MockNetboxTenant(subscription_id=None, azure_tenant_id=None)
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync(self._sync_config(azure_password_vault=""))
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_not_called()
+        self.assertIsNone(tenant.custom_fields["zabbix_hostid"])
 
 
 class TestSyncZabbixVersionHandling(unittest.TestCase):

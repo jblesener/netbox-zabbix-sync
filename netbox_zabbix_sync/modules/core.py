@@ -11,6 +11,7 @@ from pynetbox.core.query import RequestError as NetBoxRequestError
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from zabbix_utils import APIRequestError, ProcessingError, ZabbixAPI
 
+from netbox_zabbix_sync.modules.azure_subscription import AzureSubscription
 from netbox_zabbix_sync.modules.device import NetboxDeviceImport, PhysicalDevice
 from netbox_zabbix_sync.modules.exceptions import SyncError
 from netbox_zabbix_sync.modules.logging import get_logger
@@ -233,6 +234,42 @@ class Sync:
         # Add device to Zabbix
         device.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
 
+    def _process_azure_subscription(
+        self,
+        nb_tenant,
+        zabbix_groups,
+        zabbix_templates,
+    ):
+        """Run the Azure subscription sync pipeline for one NetBox Tenant."""
+        azure_subscription = AzureSubscription(
+            nb_tenant,
+            self.zabbix,
+            logger,
+            config=self.config,
+        )
+        logger.debug(
+            "Host %s: Started operations on Azure subscription.",
+            azure_subscription.name,
+        )
+        if not azure_subscription.validate():
+            return True
+        azure_subscription.set_usermacros()
+        adopted = azure_subscription.adopt_existing_zabbix_host()
+        if azure_subscription.zabbix_id:
+            azure_subscription.consistency_check(
+                zabbix_groups,
+                zabbix_templates,
+                self.config["create_hostgroups"],
+            )
+            return True
+        if not adopted:
+            azure_subscription.create_in_zabbix(
+                zabbix_groups,
+                zabbix_templates,
+                self.config["create_hostgroups"],
+            )
+        return True
+
     def _validate_netbox_token(self, token: str, nb_version: str) -> bool:
         """Validate the format of the NetBox token based on the NetBox version.
         :param token: The NetBox token to validate.
@@ -402,6 +439,13 @@ class Sync:
             netbox_vms = list(
                 self.netbox.virtualization.virtual_machines.filter(**vm_filter_combined)
             )
+        netbox_azure_subscriptions = []
+        if self.config["sync_azure_subscriptions"]:
+            netbox_azure_subscriptions = list(
+                self.netbox.tenancy.tenants.filter(
+                    tag=self.config["azure_tag"]
+                )
+            )
         netbox_site_groups = convert_recordset(self.netbox.dcim.site_groups.all())
         netbox_regions = convert_recordset(self.netbox.dcim.regions.all())
         netbox_journals = self.netbox.extras.journal_entries
@@ -426,6 +470,14 @@ class Sync:
                 proxy["name"] = proxy.pop("host")
         # Prepare list of all proxy and proxy_groups
         zabbix_proxy_list = proxy_prepper(zabbix_proxies, zabbix_proxygroups)
+
+        for nb_tenant in netbox_azure_subscriptions:
+            with suppress(SyncError):
+                self._process_azure_subscription(
+                    nb_tenant,
+                    zabbix_groups,
+                    zabbix_templates,
+                )
 
         # Go through all NetBox devices
         for nb_vm in netbox_vms:

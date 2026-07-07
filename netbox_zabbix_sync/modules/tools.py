@@ -1,6 +1,7 @@
 """A collection of tools used by several classes"""
 
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any, cast, overload
 
 from netbox_zabbix_sync.modules.exceptions import HostgroupError
@@ -228,7 +229,7 @@ def sanatize_log_output(data):
     """
     if not isinstance(data, dict):
         return data
-    sanitized_data = data.copy()
+    sanitized_data = deepcopy(data)
     # Mask the TLS pre-shared key (and its identity) as these are secrets.
     for tls_secret in ("tls_psk", "tls_psk_identity"):
         if tls_secret in sanitized_data:
@@ -236,8 +237,8 @@ def sanatize_log_output(data):
     # Check if there are any sensitive macros defined in the data
     if "macros" in data:
         for macro in sanitized_data["macros"]:
-            # Check if macro is secret type
-            if not (macro["type"] == str(1) or macro["type"] == 1):
+            # Check if macro is secret or vault type
+            if macro["type"] not in (str(1), 1, str(2), 2):
                 continue
             macro["value"] = "********"
     # Check for interface data

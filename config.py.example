@@ -46,6 +46,27 @@ sync_vms = False
 # Check the README documentation for values to use in the VM hostgroup format.
 vm_hostgroup_format = "cluster_type/cluster/role"
 
+## Azure subscription sync
+# Set sync_azure_subscriptions to True to sync NetBox Tenants tagged
+# with azure_tag as Zabbix hosts using the Azure by HTTP template.
+sync_azure_subscriptions = False
+azure_tag = "azure"
+
+# The subscription Tenant must have azure_subscription_id_cf and
+# azure_zabbix_hostid_cf custom fields. Its Tenant Group must have
+# azure_tenant_id_cf. The group represents the Azure management group/tenant.
+azure_subscription_id_cf = "azure_subscription_id"
+azure_tenant_id_cf = "azure_tenant_id"
+azure_zabbix_hostid_cf = "zabbix_hostid"
+
+# Zabbix objects used for Azure subscription hosts.
+azure_template = "Azure by HTTP"
+azure_hostgroup = "Azure/Subscriptions"
+
+# Zabbix Vault macro references for the Azure service principal credentials.
+azure_app_id_vault = ""
+azure_password_vault = ""
+
 ## Proxy Sync
 # Set to true to enable removal of proxy's under hosts. Use with caution and make sure that you specified
 # all the required proxy's in the device config context before enabeling this option.
