@@ -219,7 +219,9 @@ class AzureSubscription:
     def _zabbix_hostname_exists(self):
         """Return whether a Zabbix host already exists for this subscription."""
         zbx_filter = (
-            {"name": self.visible_name} if self.use_visible_name else {"host": self.name}
+            {"name": self.visible_name}
+            if self.use_visible_name
+            else {"host": self.name}
         )
         return bool(self.zabbix.host.get(filter=zbx_filter, output=[]))
 
@@ -294,7 +296,8 @@ class AzureSubscription:
             "interfaces": [],
             "groups": self.group_ids,
             "templates": [
-                {"templateid": template["templateid"]} for template in self.zbx_templates
+                {"templateid": template["templateid"]}
+                for template in self.zbx_templates
             ],
             "macros": self.macros,
         }

@@ -442,9 +442,7 @@ class Sync:
         netbox_azure_subscriptions = []
         if self.config["sync_azure_subscriptions"]:
             netbox_azure_subscriptions = list(
-                self.netbox.tenancy.tenants.filter(
-                    tag=self.config["azure_tag"]
-                )
+                self.netbox.tenancy.tenants.filter(tag=self.config["azure_tag"])
             )
         netbox_site_groups = convert_recordset(self.netbox.dcim.site_groups.all())
         netbox_regions = convert_recordset(self.netbox.dcim.regions.all())

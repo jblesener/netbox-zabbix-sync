@@ -86,9 +86,7 @@ class TestSetTLS(unittest.TestCase):
         }
         device = build_device(config)
         self.assertTrue(device.set_tls())
-        self.assertEqual(
-            device.tls["tls_accept"], TLS_MODES["psk"] | TLS_MODES["cert"]
-        )
+        self.assertEqual(device.tls["tls_accept"], TLS_MODES["psk"] | TLS_MODES["cert"])
 
     def test_global_default_applied(self):
         """The global config default is used when config context lacks the keys."""

@@ -592,10 +592,7 @@ class PhysicalDevice:
         unless the NetBox config context overrides it under the 'zabbix' key.
         """
         value = self.config[key]
-        if (
-            "zabbix" in self.config_context
-            and key in self.config_context["zabbix"]
-        ):
+        if "zabbix" in self.config_context and key in self.config_context["zabbix"]:
             value = self.config_context["zabbix"][key]
         return value
 
