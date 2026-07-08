@@ -117,6 +117,30 @@ class TestUsermacroSync(unittest.TestCase):
         self.assertIsInstance(device.usermacros, list)
         self.assertGreater(len(device.usermacros), 0)
 
+    @patch("netbox_zabbix_sync.modules.device.ZabbixUsermacros")
+    @patch.object(PhysicalDevice, "_usermacro_map")
+    def test_usermacro_sync_partial(self, mock_usermacro_map, mock_usermacros_class):
+        mock_usermacro_map.return_value = self.usermacro_map
+        mock_macros_instance = MagicMock()
+        mock_macros_instance.sync = True
+        mock_macros_instance.generate.return_value = [
+            {"macro": "{$HW_SERIAL}", "value": "1234"}
+        ]
+        mock_usermacros_class.return_value = mock_macros_instance
+
+        device = self.create_mock_device(
+            config={
+                "usermacro_sync": "partial",
+                "device_cf": "zabbix_hostid",
+                "tag_sync": False,
+            }
+        )
+
+        device.set_usermacros()
+
+        self.assertIsInstance(device.usermacros, list)
+        self.assertGreater(len(device.usermacros), 0)
+
 
 class TestZabbixUsermacros(unittest.TestCase):
     def setUp(self):
@@ -135,6 +159,13 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertFalse(macros.validate_macro("{TEST_MACRO}"))
         self.assertFalse(macros.validate_macro("{$test}"))  # lower-case not allowed
         self.assertFalse(macros.validate_macro(""))
+
+    def test_partial_mode_sets_partial_sync_without_force_sync(self):
+        macros = ZabbixUsermacros(self.nb, {}, "partial", logger=self.logger)
+
+        self.assertTrue(macros.sync)
+        self.assertTrue(macros.partial_sync)
+        self.assertFalse(macros.force_sync)
 
     def test_render_macro_dict(self):
         macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
@@ -174,6 +205,22 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["macro"], "{$FOO}")
         self.assertEqual(result[1]["macro"], "{$BAR}")
+
+    def test_generate_config_context_overrides_field_macro_in_partial_merge(self):
+        config_context = {
+            "zabbix": {"usermacros": {"{$FOO}": "from-context"}}
+        }
+        nb = DummyNB(config_context=config_context, serial="from-map")
+        macros = ZabbixUsermacros(
+            nb, {"serial": "{$FOO}"}, "partial", logger=self.logger
+        )
+
+        result = macros.generate()
+        merged = ZabbixUsermacros.merge_partial([], result)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["macro"], "{$FOO}")
+        self.assertEqual(merged[0]["value"], "from-context")
 
     def test_generate_from_config_context(self):
         config_context = {"zabbix": {"usermacros": {"{$TEST_MACRO}": "test_value"}}}
@@ -321,6 +368,74 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["value"], "secret-server.company.com")
         self.assertEqual(result[0]["type"], "1")
+
+    def test_partial_merge_preserves_overwrites_and_adds_macros(self):
+        zabbix_macros = [
+            {
+                "macro": "{$ZABBIX_ONLY}",
+                "value": "keep",
+                "type": "0",
+                "description": "",
+            },
+            {
+                "macro": "{$OVERWRITE}",
+                "value": "old",
+                "type": "0",
+                "description": "",
+            },
+        ]
+        netbox_macros = [
+            {
+                "macro": "{$OVERWRITE}",
+                "value": "new",
+                "type": "0",
+                "description": "from-netbox",
+            },
+            {
+                "macro": "{$NETBOX_ONLY}",
+                "value": "add",
+                "type": "0",
+                "description": "",
+            },
+        ]
+
+        result = ZabbixUsermacros.merge_partial(zabbix_macros, netbox_macros)
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "macro": "{$ZABBIX_ONLY}",
+                    "value": "keep",
+                    "type": "0",
+                    "description": "",
+                },
+                {
+                    "macro": "{$OVERWRITE}",
+                    "value": "new",
+                    "type": "0",
+                    "description": "from-netbox",
+                },
+                {
+                    "macro": "{$NETBOX_ONLY}",
+                    "value": "add",
+                    "type": "0",
+                    "description": "",
+                },
+            ],
+        )
+
+    def test_partial_merge_keeps_existing_secret_macro_in_sync_shape(self):
+        zabbix_macros = [
+            {"macro": "{$SECRET}", "type": "1", "description": "secret"}
+        ]
+        netbox_macros = [
+            {"macro": "{$SECRET}", "type": "1", "description": "secret"}
+        ]
+
+        result = ZabbixUsermacros.merge_partial(zabbix_macros, netbox_macros)
+
+        self.assertEqual(result, zabbix_macros)
 
 
 if __name__ == "__main__":

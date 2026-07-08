@@ -23,6 +23,7 @@ class ZabbixUsermacros:
         self.usermacro_sync = usermacro_sync
         self.sync = False
         self.force_sync = False
+        self.partial_sync = False
         self._set_config()
 
     def __repr__(self):
@@ -35,12 +36,40 @@ class ZabbixUsermacros:
         """
         Setup class
         """
-        if str(self.usermacro_sync).lower() == "full":
+        sync_mode = str(self.usermacro_sync).lower()
+        if sync_mode == "full":
             self.sync = True
             self.force_sync = True
+        elif sync_mode == "partial":
+            self.sync = True
+            self.partial_sync = True
         elif self.usermacro_sync:
             self.sync = True
         return True
+
+    @staticmethod
+    def merge_partial(zabbix_macros, netbox_macros):
+        """
+        Merge NetBox macros into the existing Zabbix macro list by macro name.
+        """
+        netbox_by_name = {macro["macro"]: macro for macro in netbox_macros}
+        merged = []
+        merged_names = set()
+
+        for macro in zabbix_macros:
+            name = macro["macro"]
+            if name in netbox_by_name:
+                if name not in merged_names:
+                    merged.append(netbox_by_name[name])
+                    merged_names.add(name)
+                continue
+            merged.append(macro)
+
+        for name, macro in netbox_by_name.items():
+            if name not in merged_names:
+                merged.append(macro)
+
+        return merged
 
     def validate_macro(self, macro_name):
         """

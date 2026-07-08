@@ -162,8 +162,11 @@ vm_inventory_map = { "status/label": "deployment_status",
                      "name": "name" }
 
 # To allow syncing of usermacros from NetBox, set to True.
-# this will enable both field mapping and config context usermacros.
+# This will enable both field mapping and config context usermacros and make
+# NetBox own the full Zabbix host usermacro list.
 #
+# If set to "partial", NetBox usermacros will overwrite Zabbix usermacros
+# with the same name while preserving Zabbix-only usermacros.
 # If set to "full", it will force the update of secret usermacros every run.
 # Please see the README.md for more information.
 usermacro_sync = False

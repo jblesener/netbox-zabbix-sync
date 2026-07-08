@@ -640,9 +640,20 @@ enabling the following option in the configuration file:
 usermacro_sync = True
 ```
 
-Please be advised that enabling this option will _clear_ any usermacros
-manually set on the managed hosts and override them with the usermacros
-from NetBox.
+Please be advised that `usermacro_sync = True` makes NetBox own the full
+host usermacro list. It will _clear_ any usermacros manually set on the
+managed hosts and override them with the usermacros from NetBox.
+
+To let NetBox manage only the usermacros it defines while preserving
+Zabbix-only usermacros, use partial sync:
+
+```python
+usermacro_sync = "partial"
+```
+
+In partial mode, NetBox usermacros from both config context and field maps
+overwrite existing Zabbix usermacros with the same name. Usermacros that exist
+only in Zabbix are left unchanged.
 
 There are two NetBox sources that can be used to populate usermacros:
 
@@ -717,8 +728,9 @@ Alternatively, you can set the following option in the config file:
 usermacro_sync = "full"
 ```
 
-This will force a full usermacro sync on every run on hosts that have secret usermacros set.
-That way, you will know for sure the secret values are always up to date.
+This keeps full-list ownership and forces secret usermacro values to be sent on
+every run. That way, you will know for sure the secret values are always up to
+date.
 
 Keep in mind that NetBox will show your secrets in plain text.
 If true secrecy is required, consider switching to

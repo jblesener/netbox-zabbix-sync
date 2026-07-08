@@ -1193,11 +1193,14 @@ class PhysicalDevice:
 
         # Check host usermacros
         if self.config["usermacro_sync"]:
-            # Make a full copy synce we dont want to lose the original value
+            # Make a full copy since we dont want to lose the original value
             # of secret type macros from Netbox
             netbox_macros = deepcopy(self.usermacros)
             # Set the sync bit
             full_sync_bit = bool(str(self.config["usermacro_sync"]).lower() == "full")
+            partial_sync_bit = bool(
+                str(self.config["usermacro_sync"]).lower() == "partial"
+            )
             for macro in netbox_macros:
                 # If the Macro is a secret and full sync is NOT activated
                 if macro["type"] == str(1) and not full_sync_bit:
@@ -1205,19 +1208,30 @@ class PhysicalDevice:
                     # This is required when you want to do a diff between both lists
                     macro.pop("value")
 
+            if partial_sync_bit:
+                compare_macros = ZabbixUsermacros.merge_partial(
+                    host["macros"], netbox_macros
+                )
+                update_macros = ZabbixUsermacros.merge_partial(
+                    host["macros"], self.usermacros
+                )
+            else:
+                compare_macros = netbox_macros
+                update_macros = self.usermacros
+
             # Sort all lists
             def filter_with_macros(macro):
                 return macro["macro"]
 
             host["macros"].sort(key=filter_with_macros)
-            netbox_macros.sort(key=filter_with_macros)
+            compare_macros.sort(key=filter_with_macros)
             # Check if both lists are the same
-            if host["macros"] == netbox_macros:
+            if host["macros"] == compare_macros:
                 self.logger.debug("Host %s: Usermacros in-sync.", self.name)
             else:
                 self.logger.info("Host %s: Usermacros OUT of sync.", self.name)
                 # Update Zabbix with NetBox usermacros
-                self.update_zabbix_host(macros=self.usermacros)
+                self.update_zabbix_host(macros=update_macros)
 
         # Check host tags
         if self.config["tag_sync"]:
