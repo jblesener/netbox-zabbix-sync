@@ -105,6 +105,7 @@ class PhysicalDevice:
         self.usermacros = []
         self.tags = {}
         self.tls = {}
+        self.adopted_azure_discovered_host = False
         self.logger = logger if logger else getLogger(__name__)
         self._set_basics()
 
@@ -453,6 +454,67 @@ class PhysicalDevice:
             return str(platform.name)
         return str(platform)
 
+    def _custom_field_value(self, field_name):
+        """Return a custom field value from the NetBox object."""
+        if not field_name:
+            return None
+        custom_fields = getattr(self.nb, "custom_fields", None)
+        if not custom_fields:
+            return None
+        value = custom_fields.get(field_name)
+        if isinstance(value, dict):
+            return value.get("value") or value.get("name") or value.get("display")
+        return value
+
+    def _azure_resource_id(self):
+        """Return the configured NetBox Azure resource ID value, if present."""
+        value = self._custom_field_value(self.config.get("azure_vm_resource_id_cf"))
+        return str(value).lower() if value else ""
+
+    def _object_name(self, obj):
+        """Return a lowercase displayable name for a NetBox related object."""
+        if not obj:
+            return ""
+        if hasattr(obj, "name") and obj.name:
+            return str(obj.name).lower()
+        if hasattr(obj, "slug") and obj.slug:
+            return str(obj.slug).lower()
+        return str(obj).lower()
+
+    def _config_list(self, key):
+        """Return a config value as a list."""
+        value = self.config.get(key, [])
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value or []
+
+    def _is_azure_vm_candidate(self):
+        """Return whether this NetBox VM appears to represent an Azure VM."""
+        if self.hostgroup_type != "vm":
+            return False
+        if self._azure_resource_id():
+            return True
+        keywords = [
+            str(keyword).lower()
+            for keyword in self._config_list("azure_vm_platform_keywords")
+            if str(keyword)
+        ]
+        if not keywords:
+            return False
+        candidates = [self._platform_name().lower()]
+        cluster = getattr(self.nb, "cluster", None)
+        candidates.append(self._object_name(cluster))
+        candidates.append(self._object_name(getattr(cluster, "type", None)))
+        candidates.append(self._object_name(getattr(self.nb, "tenant", None)))
+        for tag in getattr(self.nb, "tags", []) or []:
+            candidates.append(self._object_name(tag))
+        return any(
+            keyword in candidate
+            for keyword in keywords
+            for candidate in candidates
+            if candidate
+        )
+
     def _is_adoption_candidate(self):
         """Check whether this object should be considered for host adoption."""
         if not self.config.get("adopt_existing_hosts"):
@@ -464,6 +526,8 @@ class PhysicalDevice:
             return True
         if scope == "esxi":
             return "esxi" in self._platform_name().lower()
+        if scope in ("azure", "cloud"):
+            return self._is_azure_vm_candidate()
         self.logger.warning(
             "Host %s: Unsupported adopt_scope '%s'. Skipping adoption.",
             self.name,
@@ -480,6 +544,42 @@ class PhysicalDevice:
             lookups.append({"name": self.name})
         return list(dict.fromkeys(tuple(sorted(i.items())) for i in lookups))
 
+    def _host_azure_resource_id_matches(self, host):
+        """Return whether the Zabbix host metadata contains the configured Azure ID."""
+        resource_id = self._azure_resource_id()
+        if not resource_id:
+            return False
+        for value in (host.get("host"), host.get("name")):
+            if value and str(value).lower() == resource_id:
+                return True
+        inventory = host.get("inventory") or {}
+        if isinstance(inventory, dict):
+            for value in inventory.values():
+                if value and str(value).lower() == resource_id:
+                    return True
+        for macro in host.get("macros", []) or []:
+            if str(macro.get("value", "")).lower() == resource_id:
+                return True
+        for tag in host.get("tags", []) or []:
+            if str(tag.get("value", "")).lower() == resource_id:
+                return True
+        return False
+
+    def _host_has_azure_discovered_template(self, host):
+        """Return whether a matched Zabbix host has an Azure VM template link."""
+        template_names = {
+            str(name).lower()
+            for name in self._config_list("azure_vm_discovered_templates")
+            if str(name)
+        }
+        if not template_names:
+            return False
+        for template in host.get("parentTemplates", []) or []:
+            name = str(template.get("name", "")).lower()
+            if any(template_name in name for template_name in template_names):
+                return True
+        return False
+
     def adopt_existing_zabbix_host(self):
         """
         Link to an existing Zabbix host by name if this object is in adoption scope.
@@ -493,7 +593,12 @@ class PhysicalDevice:
             for lookup_tuple in self._zabbix_name_lookup_candidates():
                 lookup = dict(lookup_tuple)
                 for host in self.zabbix.host.get(
-                    filter=lookup, output=["hostid", "host", "name"]
+                    filter=lookup,
+                    output=["hostid", "host", "name"],
+                    selectParentTemplates=["templateid", "name"],
+                    selectInventory="extend",
+                    selectMacros=["macro", "value"],
+                    selectTags=["tag", "value"],
                 ):
                     if "hostid" in host:
                         matches[host["hostid"]] = host
@@ -507,6 +612,13 @@ class PhysicalDevice:
                 "Host %s: No existing Zabbix host matched for adoption.", self.name
             )
             return False
+        resource_matches = {
+            hostid: host
+            for hostid, host in matches.items()
+            if self._host_azure_resource_id_matches(host)
+        }
+        if resource_matches:
+            matches = resource_matches
         if len(matches) > 1:
             self.logger.warning(
                 "Host %s: Multiple Zabbix hosts matched by name. Skipping adoption.",
@@ -518,6 +630,8 @@ class PhysicalDevice:
         self.zabbix_id = int(host["hostid"])
         self.nb.custom_fields[self.device_cf] = self.zabbix_id
         self.nb.save()
+        if self._host_has_azure_discovered_template(host):
+            self.adopted_azure_discovered_host = True
         self.logger.info(
             "Host %s: Adopted existing Zabbix host by name. (ID:%s)",
             self.name,

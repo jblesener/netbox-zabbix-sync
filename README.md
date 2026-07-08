@@ -231,7 +231,7 @@ discovery (for example VMware LLD).
 
 ```python
 adopt_existing_hosts = True
-adopt_scope = "esxi"           # "esxi" or "all"
+adopt_scope = "esxi"           # "esxi", "azure", "cloud", or "all"
 adopt_for_vms = True           # include VMs in adoption scope checks
 adopt_enrich_mode = "full"     # "full" or "metadata_only"
 ```
@@ -241,11 +241,29 @@ Behavior:
 - Adoption is attempted only for objects in scope.
 - `adopt_scope = "esxi"` matches objects where NetBox `platform` contains
   `ESXi` (case-insensitive).
+- `adopt_scope = "azure"` matches VMs where the configured Azure resource ID
+  field is populated, or where the VM platform, cluster, cluster type, tenant,
+  or tag contains one of `azure_vm_platform_keywords` (default: `["azure"]`).
 - A unique name match in Zabbix is required. If multiple hosts match, adoption
   is skipped for safety.
+- Azure VM hosts linked to `azure_vm_discovered_templates` (default:
+  `["Azure Virtual Machine by HTTP"]`) are treated as discovery-owned and use
+  metadata-only enrichment after adoption.
 - On successful adoption, the script writes the matched `hostid` into the
   configured NetBox custom field (`device_cf`, or `oob_device_cf` for OOB
   split imports).
+
+For Azure VM adoption from the `Azure by HTTP` discovery, use:
+
+```python
+adopt_existing_hosts = True
+adopt_scope = "azure"
+adopt_for_vms = True
+adopt_enrich_mode = "metadata_only"
+azure_vm_platform_keywords = ["azure"]
+azure_vm_discovered_templates = ["Azure Virtual Machine by HTTP"]
+azure_vm_resource_id_cf = ""   # optional NetBox VM custom field
+```
 
 `adopt_enrich_mode` controls post-adoption sync:
 

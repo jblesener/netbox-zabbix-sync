@@ -216,8 +216,10 @@ class Sync:
                 zabbix_groups.append(group)
         adopted = device.adopt_existing_zabbix_host()
         full_sync = True
-        if adopted and str(device_config.get("adopt_enrich_mode", "full")).lower() == (
-            "metadata_only"
+        if adopted and (
+            device.adopted_azure_discovered_host
+            or str(device_config.get("adopt_enrich_mode", "full")).lower()
+            == "metadata_only"
         ):
             full_sync = False
         # Check if device is already in Zabbix
@@ -542,9 +544,11 @@ class Sync:
                         zabbix_groups.append(group)
                 adopted = vm.adopt_existing_zabbix_host()
                 full_sync = True
-                if adopted and str(
-                    self.config.get("adopt_enrich_mode", "full")
-                ).lower() == ("metadata_only"):
+                if adopted and (
+                    vm.adopted_azure_discovered_host
+                    or str(self.config.get("adopt_enrich_mode", "full")).lower()
+                    == "metadata_only"
+                ):
                     full_sync = False
                 # Check if VM is already in Zabbix
                 if vm.zabbix_id:

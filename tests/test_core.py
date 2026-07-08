@@ -209,6 +209,7 @@ class MockNetboxVM(MockRecord):
         tenant=None,
         platform=None,
         tags=None,
+        custom_fields=None,
     ):
         super().__init__(values={}, api=None, endpoint=None)
         self.id = vm_id
@@ -216,7 +217,9 @@ class MockNetboxVM(MockRecord):
         self.status = MagicMock()
         self.status.label = status_label
         self.status.value = status_label.lower()
-        self.custom_fields = {"zabbix_hostid": zabbix_hostid}
+        self.custom_fields = (
+            custom_fields if custom_fields is not None else {"zabbix_hostid": zabbix_hostid}
+        )
         # Default config_context includes a template so the VM is not skipped
         self.config_context = (
             config_context
@@ -2392,6 +2395,211 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
         self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
         mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopt_existing_azure_vm_by_name(self, mock_api, mock_zabbix_api):
+        """Azure VM with empty hostid should adopt a unique discovered host."""
+        platform = MagicMock()
+        platform.name = "Microsoft Azure"
+        vm = MockNetboxVM(
+            name="azure-vm01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [
+                {
+                    "hostid": "77",
+                    "host": "azure-vm01",
+                    "name": "azure-vm01",
+                    "parentTemplates": [{"name": "Azure Virtual Machine by HTTP"}],
+                }
+            ],
+            [],
+            self._make_zabbix_host(hostname="azure-vm01", status="0"),
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "adopt_scope": "azure",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_azure_resource_id_narrows_multiple_name_matches(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Configured Azure resource ID can select one matching Zabbix host."""
+        vm = MockNetboxVM(
+            name="azure-vm02",
+            status_label="Active",
+            custom_fields={
+                "zabbix_hostid": None,
+                "azure_resource_id": "/subscriptions/123/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/azure-vm02",
+            },
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [
+                {
+                    "hostid": "77",
+                    "host": "azure-vm02",
+                    "name": "azure-vm02",
+                    "macros": [],
+                    "tags": [],
+                    "inventory": {},
+                    "parentTemplates": [{"name": "Azure Virtual Machine by HTTP"}],
+                },
+                {
+                    "hostid": "78",
+                    "host": "azure-vm02",
+                    "name": "azure-vm02",
+                    "macros": [
+                        {
+                            "macro": "{$AZURE.RESOURCE.ID}",
+                            "value": "/subscriptions/123/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/azure-vm02",
+                        }
+                    ],
+                    "tags": [],
+                    "inventory": {},
+                    "parentTemplates": [{"name": "Azure Virtual Machine by HTTP"}],
+                },
+            ],
+            [],
+            self._make_zabbix_host(hostname="azure-vm02", status="0"),
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "adopt_scope": "azure",
+                "azure_vm_resource_id_cf": "azure_resource_id",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 78)
+        mock_zabbix.host.create.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_non_azure_vm_not_adopted_with_azure_scope(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Azure-only adoption should not adopt ordinary VMs."""
+        platform = MagicMock()
+        platform.name = "Ubuntu Linux"
+        vm = MockNetboxVM(
+            name="linux-vm01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "adopt_scope": "azure",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_called_once()
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_azure_discovered_vm_adoption_preserves_discovery_owned_fields(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Azure discovered templates force metadata-only sync after adoption."""
+        platform = MagicMock()
+        platform.name = "Microsoft Azure"
+        vm = MockNetboxVM(
+            name="azure-vm03",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [
+                {
+                    "hostid": "77",
+                    "host": "azure-vm03",
+                    "name": "azure-vm03",
+                    "parentTemplates": [{"name": "Azure Virtual Machine by HTTP"}],
+                }
+            ],
+            [],
+            self._make_zabbix_host(hostname="azure-vm03", status="1"),
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "adopt_scope": "azure",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
         mock_zabbix.host.update.assert_not_called()
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")

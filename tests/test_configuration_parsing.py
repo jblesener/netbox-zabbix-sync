@@ -43,6 +43,11 @@ def test_load_config_defaults():
         assert config["azure_hostgroup"] == "Azure/Subscriptions"
         assert config["azure_app_id_vault"] == ""
         assert config["azure_password_vault"] == ""
+        assert config["azure_vm_platform_keywords"] == ["azure"]
+        assert config["azure_vm_discovered_templates"] == [
+            "Azure Virtual Machine by HTTP"
+        ]
+        assert config["azure_vm_resource_id_cf"] == ""
 
 
 def test_load_config_file():

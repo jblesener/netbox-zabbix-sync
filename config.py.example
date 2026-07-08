@@ -67,6 +67,19 @@ azure_hostgroup = "Azure/Subscriptions"
 azure_app_id_vault = ""
 azure_password_vault = ""
 
+# Azure VM adoption from Zabbix Azure by HTTP discovery.
+# Use with:
+#   adopt_existing_hosts = True
+#   adopt_scope = "azure"
+#   adopt_for_vms = True
+#   adopt_enrich_mode = "metadata_only"
+azure_vm_platform_keywords = ["azure"]
+azure_vm_discovered_templates = ["Azure Virtual Machine by HTTP"]
+# Optional NetBox VM custom field containing the Azure resource ID.
+# When set and populated, a matched Zabbix host must contain the same value in
+# host/name, inventory, user macros, or tags to narrow ambiguous name matches.
+azure_vm_resource_id_cf = ""
+
 ## Proxy Sync
 # Set to true to enable removal of proxy's under hosts. Use with caution and make sure that you specified
 # all the required proxy's in the device config context before enabeling this option.

@@ -98,8 +98,13 @@ _STR_ARGS = [
         "PATH",
     ),
     (
+        "azure_vm_resource_id_cf",
+        "Optional VM custom field containing the Azure resource ID for adoption.",
+        "FIELD",
+    ),
+    (
         "adopt_scope",
-        "Adoption target scope for empty-hostid objects (e.g. esxi, all).",
+        "Adoption target scope for empty-hostid objects (e.g. esxi, azure, cloud, all).",
         "SCOPE",
     ),
     (
