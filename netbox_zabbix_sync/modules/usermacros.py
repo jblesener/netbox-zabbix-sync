@@ -3,11 +3,12 @@ All of the Zabbix Usermacro related configuration
 """
 
 from logging import getLogger
-from re import match
+from re import finditer, match
 
 from netbox_zabbix_sync.modules.tools import field_mapper, sanatize_log_output
 
 MAX_VALUE_SIZE = 2048
+NETBOX_PLACEHOLDER_PATTERN = r"\{netbox:([^{}]+)\}"
 
 
 class ZabbixUsermacros:
@@ -47,6 +48,88 @@ class ZabbixUsermacros:
         """
         pattern = r"\{\$[A-Z0-9\._]*(\:.*)?\}"
         return match(pattern, macro_name)
+
+    def _lookup_netbox_path(self, macro_name, path):
+        """
+        Resolve a slash-delimited NetBox field path for config context macros.
+        """
+        value = self.nb
+        for item in path.split("/"):
+            if not item:
+                self.logger.warning(
+                    "Host %s: Usermacro %s has invalid NetBox placeholder path '%s', skipping.",
+                    self.name,
+                    macro_name,
+                    path,
+                )
+                return None, False
+            try:
+                if isinstance(value, dict):
+                    value = value[item]
+                elif hasattr(value, item):
+                    value = getattr(value, item)
+                else:
+                    value = value[item]
+            except (AttributeError, KeyError, IndexError, TypeError):
+                self.logger.warning(
+                    "Host %s: Usermacro %s references unknown NetBox field '%s', skipping.",
+                    self.name,
+                    macro_name,
+                    path,
+                )
+                return None, False
+
+        if (value and isinstance(value, int | float | str | list | dict)) or (
+            isinstance(value, int | float) and int(value) == 0
+        ):
+            return str(value), True
+        if not value:
+            self.logger.info(
+                "Host %s: NetBox lookup for '%s' returned an empty value.",
+                self.name,
+                path,
+            )
+            return "", True
+
+        self.logger.warning(
+            "Host %s: Usermacro %s NetBox lookup for '%s' returned an unexpected type, skipping.",
+            self.name,
+            macro_name,
+            path,
+        )
+        return None, False
+
+    def _expand_netbox_placeholders(self, macro_name, value):
+        """
+        Replace {netbox:path/to/field} placeholders in config context macro values.
+        """
+        if not isinstance(value, str):
+            return value
+
+        expanded = value
+        for placeholder in finditer(NETBOX_PLACEHOLDER_PATTERN, value):
+            path = placeholder.group(1)
+            resolved, valid = self._lookup_netbox_path(macro_name, path)
+            if not valid:
+                return None
+            expanded = expanded.replace(placeholder.group(0), resolved)
+        return expanded
+
+    def _expand_config_context_properties(self, macro_name, properties):
+        """
+        Expand NetBox placeholders for config context usermacro properties.
+        """
+        if isinstance(properties, dict):
+            expanded = properties.copy()
+            if "value" in expanded:
+                expanded["value"] = self._expand_netbox_placeholders(
+                    macro_name, expanded["value"]
+                )
+                if expanded["value"] is None:
+                    return None
+            return expanded
+
+        return self._expand_netbox_placeholders(macro_name, properties)
 
     def render_macro(self, macro_name, macro_properties):
         """
@@ -134,7 +217,12 @@ class ZabbixUsermacros:
             for macro, properties in self.nb.config_context["zabbix"][
                 "usermacros"
             ].items():
-                m = self.render_macro(macro, properties)
+                expanded_properties = self._expand_config_context_properties(
+                    macro, properties
+                )
+                if expanded_properties is None:
+                    continue
+                m = self.render_macro(macro, expanded_properties)
                 if m:
                     macros.append(m)
         data = {"macros": macros}

@@ -184,6 +184,144 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(result[0]["macro"], "{$TEST_MACRO}")
         self.assertEqual(result[0]["value"], "test_value")
 
+    def test_generate_expands_config_context_string_value(self):
+        config_context = {
+            "zabbix": {
+                "usermacros": {"{$VMWARE.URL}": "https://{netbox:name}/sdk"}
+            }
+        }
+        nb = DummyNB(name="server.company.com", config_context=config_context)
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["macro"], "{$VMWARE.URL}")
+        self.assertEqual(result[0]["value"], "https://server.company.com/sdk")
+
+    def test_generate_expands_config_context_dict_value(self):
+        config_context = {
+            "zabbix": {
+                "usermacros": {
+                    "{$VMWARE.URL}": {
+                        "type": "text",
+                        "value": "https://{netbox:name}/sdk",
+                        "description": "VMware SDK endpoint",
+                    }
+                }
+            }
+        }
+        nb = DummyNB(name="server.company.com", config_context=config_context)
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["value"], "https://server.company.com/sdk")
+        self.assertEqual(result[0]["type"], "0")
+        self.assertEqual(result[0]["description"], "VMware SDK endpoint")
+
+    def test_generate_expands_nested_netbox_path(self):
+        config_context = {
+            "zabbix": {
+                "usermacros": {"{$PRIMARY_IP}": "{netbox:primary_ip/address}"}
+            }
+        }
+        nb = DummyNB(
+            config_context=config_context,
+            primary_ip=DummyNB(address="192.0.2.1/24"),
+        )
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["value"], "192.0.2.1/24")
+
+    def test_generate_expands_custom_field_path(self):
+        config_context = {
+            "zabbix": {
+                "usermacros": {
+                    "{$VMWARE.URL}": "https://{netbox:custom_fields/vmware_fqdn}/sdk"
+                }
+            }
+        }
+        nb = DummyNB(
+            config_context=config_context,
+            custom_fields={"vmware_fqdn": "server.company.com"},
+        )
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["value"], "https://server.company.com/sdk")
+
+    def test_generate_expands_multiple_placeholders(self):
+        config_context = {
+            "zabbix": {
+                "usermacros": {
+                    "{$SUMMARY}": "{netbox:name} {netbox:primary_ip/address}"
+                }
+            }
+        }
+        nb = DummyNB(
+            name="server.company.com",
+            config_context=config_context,
+            primary_ip=DummyNB(address="192.0.2.1/24"),
+        )
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["value"], "server.company.com 192.0.2.1/24")
+
+    def test_generate_empty_placeholder_value_expands_to_empty_string(self):
+        config_context = {
+            "zabbix": {"usermacros": {"{$OPTIONAL}": "value-{netbox:serial}"}}
+        }
+        nb = DummyNB(config_context=config_context, serial="")
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["value"], "value-")
+        self.logger.info.assert_called()
+
+    def test_generate_invalid_placeholder_path_skips_macro(self):
+        config_context = {
+            "zabbix": {"usermacros": {"{$BAD}": "value-{netbox:not_a_field}"}}
+        }
+        nb = DummyNB(config_context=config_context)
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(result, [])
+        self.logger.warning.assert_called()
+
+    def test_generate_expands_secret_macro_value(self):
+        config_context = {
+            "zabbix": {
+                "usermacros": {
+                    "{$SECRET}": {
+                        "type": "secret",
+                        "value": "secret-{netbox:name}",
+                    }
+                }
+            }
+        }
+        nb = DummyNB(name="server.company.com", config_context=config_context)
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["value"], "secret-server.company.com")
+        self.assertEqual(result[0]["type"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()
