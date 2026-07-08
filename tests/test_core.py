@@ -218,7 +218,9 @@ class MockNetboxVM(MockRecord):
         self.status.label = status_label
         self.status.value = status_label.lower()
         self.custom_fields = (
-            custom_fields if custom_fields is not None else {"zabbix_hostid": zabbix_hostid}
+            custom_fields
+            if custom_fields is not None
+            else {"zabbix_hostid": zabbix_hostid}
         )
         # Default config_context includes a template so the VM is not skipped
         self.config_context = (
@@ -2516,9 +2518,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
-    def test_non_azure_vm_not_adopted_with_azure_scope(
-        self, mock_api, mock_zabbix_api
-    ):
+    def test_non_azure_vm_not_adopted_with_azure_scope(self, mock_api, mock_zabbix_api):
         """Azure-only adoption should not adopt ordinary VMs."""
         platform = MagicMock()
         platform.name = "Ubuntu Linux"

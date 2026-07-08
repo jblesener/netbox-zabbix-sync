@@ -207,9 +207,7 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(result[1]["macro"], "{$BAR}")
 
     def test_generate_config_context_overrides_field_macro_in_partial_merge(self):
-        config_context = {
-            "zabbix": {"usermacros": {"{$FOO}": "from-context"}}
-        }
+        config_context = {"zabbix": {"usermacros": {"{$FOO}": "from-context"}}}
         nb = DummyNB(config_context=config_context, serial="from-map")
         macros = ZabbixUsermacros(
             nb, {"serial": "{$FOO}"}, "partial", logger=self.logger
@@ -233,9 +231,7 @@ class TestZabbixUsermacros(unittest.TestCase):
 
     def test_generate_expands_config_context_string_value(self):
         config_context = {
-            "zabbix": {
-                "usermacros": {"{$VMWARE.URL}": "https://{netbox:name}/sdk"}
-            }
+            "zabbix": {"usermacros": {"{$VMWARE.URL}": "https://{netbox:name}/sdk"}}
         }
         nb = DummyNB(name="server.company.com", config_context=config_context)
         macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
@@ -270,9 +266,7 @@ class TestZabbixUsermacros(unittest.TestCase):
 
     def test_generate_expands_nested_netbox_path(self):
         config_context = {
-            "zabbix": {
-                "usermacros": {"{$PRIMARY_IP}": "{netbox:primary_ip/address}"}
-            }
+            "zabbix": {"usermacros": {"{$PRIMARY_IP}": "{netbox:primary_ip/address}"}}
         }
         nb = DummyNB(
             config_context=config_context,
@@ -426,12 +420,8 @@ class TestZabbixUsermacros(unittest.TestCase):
         )
 
     def test_partial_merge_keeps_existing_secret_macro_in_sync_shape(self):
-        zabbix_macros = [
-            {"macro": "{$SECRET}", "type": "1", "description": "secret"}
-        ]
-        netbox_macros = [
-            {"macro": "{$SECRET}", "type": "1", "description": "secret"}
-        ]
+        zabbix_macros = [{"macro": "{$SECRET}", "type": "1", "description": "secret"}]
+        netbox_macros = [{"macro": "{$SECRET}", "type": "1", "description": "secret"}]
 
         result = ZabbixUsermacros.merge_partial(zabbix_macros, netbox_macros)
 
