@@ -51,6 +51,7 @@ class TestListHostgroupFormats(unittest.TestCase):
 
         # Device-specific properties
         device_type = MagicMock()
+        device_type.model = "TestDeviceType"
         manufacturer = MagicMock()
         manufacturer.name = "TestManufacturer"
         device_type.manufacturer = manufacturer
@@ -95,6 +96,28 @@ class TestListHostgroupFormats(unittest.TestCase):
         # Should raise exception for invalid format
         with self.assertRaises(HostgroupError):
             verify_hg_format(invalid_format, hg_type="dev", logger=self.mock_logger)
+
+    def test_verify_owner_hostgroup_formats(self):
+        """Test ownership fields are valid for devices and VMs."""
+        owner_format = "owner_group/owner"
+        owner_list_format = ["site", owner_format]
+
+        verify_hg_format(owner_format, hg_type="dev", logger=self.mock_logger)
+        verify_hg_format(owner_list_format, hg_type="dev", logger=self.mock_logger)
+        verify_hg_format(owner_format, hg_type="vm", logger=self.mock_logger)
+        verify_hg_format(owner_list_format, hg_type="vm", logger=self.mock_logger)
+
+    def test_verify_device_type_hostgroup_formats(self):
+        """Test device_type is valid only for device hostgroup formats."""
+        device_type_format = "manufacturer/device_type"
+        device_type_list_format = ["site", device_type_format]
+
+        verify_hg_format(device_type_format, hg_type="dev", logger=self.mock_logger)
+        verify_hg_format(
+            device_type_list_format, hg_type="dev", logger=self.mock_logger
+        )
+        with self.assertRaises(HostgroupError):
+            verify_hg_format(device_type_format, hg_type="vm", logger=self.mock_logger)
 
     def test_simulate_hostgroup_generation_from_config(self):
         """Simulate how the main script would generate hostgroups from list-based config."""

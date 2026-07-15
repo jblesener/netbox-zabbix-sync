@@ -171,6 +171,7 @@ def verify_hg_format(
             "location",
             "rack",
             "role",
+            "device_type",
             "manufacturer",
             "region",
             "site",
@@ -178,6 +179,8 @@ def verify_hg_format(
             "tenant",
             "tenant_group",
             "platform",
+            "owner",
+            "owner_group",
             "cluster",
         ],
         "vm": [
@@ -192,6 +195,8 @@ def verify_hg_format(
             "cluster",
             "device",
             "platform",
+            "owner",
+            "owner_group",
         ],
         "cfs": {"dev": [], "vm": []},
     }

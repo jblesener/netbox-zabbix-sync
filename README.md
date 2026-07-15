@@ -289,12 +289,15 @@ used:
 | tenant        | Tenant name                                                                          |
 | tenant_group  | Tenant group name                                                                    |
 | platform      | Software platform of a device or VM                                                  |
+| owner         | Assigned owner name (requires NetBox 4.5 or newer)                                   |
+| owner_group   | Group of the assigned owner (requires NetBox 4.5 or newer)                           |
 | custom fields | See the section "Layout -> Custom Fields" to use custom fields as hostgroup variable |
 
 **Only for devices**
 
 | name         | description              |
 | ------------ | ------------------------ |
+| device_type  | Device type model        |
 | location     | The device location name |
 | manufacturer | Device manufacturer name |
 | rack         | Rack                     |
@@ -311,6 +314,12 @@ You can specify the value separated by a "/" like so:
 
 ```python
 hostgroup_format = "tenant/site/location/role"
+```
+
+For example, manufacturer and device type can be separate group levels:
+
+```python
+hostgroup_format = "site/manufacturer/device_type/role"
 ```
 
 You can also provice a list of groups like so:

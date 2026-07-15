@@ -78,8 +78,20 @@ class Hostgroup:
             format_options["platform"] = (
                 self.nb.platform.name if self.nb.platform else None
             )
+            format_options["owner"] = None
+            format_options["owner_group"] = None
+            owner = (
+                getattr(self.nb, "owner", None) if self._supports_ownership() else None
+            )
+            if owner:
+                format_options["owner"] = str(owner)
+                owner_group = getattr(owner, "group", None)
+                format_options["owner_group"] = (
+                    str(owner_group) if owner_group else None
+                )
         # Variables only applicable for devices
         if self.type == "dev":
+            format_options["device_type"] = self.nb.device_type.model
             format_options["manufacturer"] = self.nb.device_type.manufacturer.name
             format_options["location"] = (
                 str(self.nb.location) if self.nb.location else None
@@ -95,6 +107,18 @@ class Hostgroup:
             self.name,
             self.format_options,
         )
+
+    def _supports_ownership(self):
+        """Return whether this NetBox version provides object ownership."""
+        required_version_parts = 2
+        version_parts = str(self.nb_version).split(".")
+        try:
+            major_minor = tuple(
+                int(part) for part in version_parts[:required_version_parts]
+            )
+        except ValueError:
+            return False
+        return len(major_minor) == required_version_parts and major_minor >= (4, 5)
 
     def set_nesting(
         self, nested_sitegroup_flag, nested_region_flag, nb_groups, nb_regions

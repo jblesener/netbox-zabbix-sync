@@ -67,6 +67,7 @@ class TestHostgroups(unittest.TestCase):
 
         # Device-specific properties
         device_type = MagicMock()
+        device_type.model = "TestDeviceType"
         manufacturer = MagicMock()
         manufacturer.name = "TestManufacturer"
         device_type.manufacturer = manufacturer
@@ -84,6 +85,14 @@ class TestHostgroups(unittest.TestCase):
 
         # Custom fields — empty_cf is intentionally None to test the empty CF path
         self.mock_device.custom_fields = {"test_cf": "TestCF", "empty_cf": None}
+
+        # Ownership information (available in NetBox 4.5+)
+        owner_group = MagicMock()
+        owner_group.__str__.return_value = "TestOwnerGroup"
+        owner = MagicMock()
+        owner.__str__.return_value = "TestOwner"
+        owner.group = owner_group
+        self.mock_device.owner = owner
 
         # *** Mock NetBox VM setup ***
         # Create mock VM with all properties
@@ -112,6 +121,7 @@ class TestHostgroups(unittest.TestCase):
 
         # Custom fields
         self.mock_vm.custom_fields = {"test_cf": "TestCF"}
+        self.mock_vm.owner = owner
 
         # Mock data for nesting tests
         self.mock_regions_data = [
@@ -139,9 +149,12 @@ class TestHostgroups(unittest.TestCase):
         self.assertEqual(hostgroup.format_options["tenant"], "TestTenant")
         self.assertEqual(hostgroup.format_options["tenant_group"], "TestTenantGroup")
         self.assertEqual(hostgroup.format_options["platform"], "TestPlatform")
+        self.assertEqual(hostgroup.format_options["device_type"], "TestDeviceType")
         self.assertEqual(hostgroup.format_options["manufacturer"], "TestManufacturer")
         self.assertEqual(hostgroup.format_options["location"], "TestLocation")
         self.assertEqual(hostgroup.format_options["rack"], "TestRack")
+        self.assertIsNone(hostgroup.format_options["owner"])
+        self.assertIsNone(hostgroup.format_options["owner_group"])
 
     def test_vm_hostgroup_creation(self):
         """Test basic VM hostgroup creation."""
@@ -160,6 +173,57 @@ class TestHostgroups(unittest.TestCase):
         self.assertEqual(hostgroup.format_options["platform"], "TestPlatform")
         self.assertEqual(hostgroup.format_options["cluster"], "TestCluster")
         self.assertEqual(hostgroup.format_options["cluster_type"], "TestClusterType")
+        self.assertIsNone(hostgroup.format_options["owner"])
+        self.assertIsNone(hostgroup.format_options["owner_group"])
+
+    def test_device_owner_hostgroup_format(self):
+        """Test owner fields in a device hostgroup format."""
+        hostgroup = Hostgroup("dev", self.mock_device, "4.5", self.mock_logger)
+
+        self.assertEqual(hostgroup.format_options["owner"], "TestOwner")
+        self.assertEqual(hostgroup.format_options["owner_group"], "TestOwnerGroup")
+        self.assertEqual(
+            hostgroup.generate("owner_group/owner/site"),
+            "TestOwnerGroup/TestOwner/TestSite",
+        )
+
+    def test_vm_owner_hostgroup_format(self):
+        """Test owner fields in a VM hostgroup format."""
+        hostgroup = Hostgroup("vm", self.mock_vm, "4.5.1", self.mock_logger)
+
+        self.assertEqual(hostgroup.format_options["owner"], "TestOwner")
+        self.assertEqual(hostgroup.format_options["owner_group"], "TestOwnerGroup")
+        self.assertEqual(
+            hostgroup.generate("owner_group/owner/cluster"),
+            "TestOwnerGroup/TestOwner/TestCluster",
+        )
+
+    def test_owner_hostgroup_fields_are_optional(self):
+        """Test missing ownership fields are skipped during generation."""
+        self.mock_device.owner = None
+        hostgroup = Hostgroup("dev", self.mock_device, "4.5", self.mock_logger)
+
+        self.assertIsNone(hostgroup.format_options["owner"])
+        self.assertIsNone(hostgroup.format_options["owner_group"])
+        self.assertEqual(hostgroup.generate("owner/site"), "TestSite")
+        self.assertIsNone(hostgroup.generate("owner/owner_group"))
+
+    def test_owner_without_group(self):
+        """Test an owner without an owner group."""
+        self.mock_device.owner.group = None
+        hostgroup = Hostgroup("dev", self.mock_device, "4.5", self.mock_logger)
+
+        self.assertEqual(hostgroup.format_options["owner"], "TestOwner")
+        self.assertIsNone(hostgroup.format_options["owner_group"])
+        self.assertEqual(hostgroup.generate("owner_group/owner"), "TestOwner")
+
+    def test_owner_fields_on_older_netbox_version(self):
+        """Test ownership fields resolve empty before NetBox 4.5."""
+        hostgroup = Hostgroup("dev", self.mock_device, "4.4.9", self.mock_logger)
+
+        self.assertIsNone(hostgroup.format_options["owner"])
+        self.assertIsNone(hostgroup.format_options["owner_group"])
+        self.assertEqual(hostgroup.generate("owner/site"), "TestSite")
 
     def test_invalid_object_type(self):
         """Test that an invalid object type raises an exception."""
@@ -179,6 +243,10 @@ class TestHostgroups(unittest.TestCase):
         self.assertEqual(
             complex_result, "TestSite/TestTenant/TestPlatform/TestLocation"
         )
+
+        # Device type and manufacturer are available as separate path components
+        device_type_result = hostgroup.generate("manufacturer/device_type/role")
+        self.assertEqual(device_type_result, "TestManufacturer/TestDeviceType/TestRole")
 
     def test_vm_hostgroup_formats(self):
         """Test different hostgroup formats for VMs."""
