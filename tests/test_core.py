@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from zabbix_utils import APIRequestError
 
-from netbox_zabbix_sync.modules.core import Sync
+from netbox_zabbix_sync.modules.core import Sync, UnsyncedSummary, logger
+from netbox_zabbix_sync.modules.exceptions import SyncError
 
 
 class MockListObject:
@@ -2751,3 +2752,98 @@ class TestAdoptExistingHosts(unittest.TestCase):
         syncer.start()
 
         mock_zabbix.host.update.assert_called_once_with(hostid=77, status="0")
+
+
+class TestUnsyncedObjectSummary(unittest.TestCase):
+    """Exercise end-of-run reporting for skipped devices and VMs."""
+
+    def _syncer(self, devices=None, vms=None, config=None):
+        netbox = MagicMock()
+        netbox.extras.custom_fields.filter.return_value = []
+        netbox.dcim.devices.filter.return_value = devices or []
+        netbox.virtualization.virtual_machines.filter.return_value = vms or []
+        netbox.dcim.site_groups.all.return_value = []
+        netbox.dcim.regions.all.return_value = []
+        netbox.extras.journal_entries = MagicMock()
+
+        zabbix = MagicMock()
+        zabbix.version = "7.0"
+        zabbix.hostgroup.get.return_value = [
+            {"groupid": "1", "name": "TestSite/TestManufacturer/Switch"},
+            {"groupid": "2", "name": "TestSite/Switch"},
+        ]
+        zabbix.template.get.return_value = [{"templateid": "1", "name": "TestTemplate"}]
+        zabbix.proxy.get.return_value = []
+        zabbix.proxygroup.get.return_value = []
+        zabbix.host.get.return_value = []
+        zabbix.host.create.return_value = {"hostids": ["42"]}
+
+        syncer = Sync(config)
+        syncer.netbox = netbox
+        syncer.zabbix = zabbix
+        syncer.nb_version = "3.5"
+        return syncer
+
+    def test_reports_missing_primary_ip_for_device(self):
+        device = MockNetboxDevice(name="no-primary-ip")
+        device.primary_ip = None
+        syncer = self._syncer(devices=[device])
+
+        syncer.start()
+
+        self.assertEqual(
+            syncer.last_unsynced_summary.failures["no primary IP"],
+            ["Device no-primary-ip"],
+        )
+
+    def test_reports_missing_zabbix_context_for_vm(self):
+        vm = MockNetboxVM(name="no-zabbix-context", config_context={})
+        syncer = self._syncer(
+            vms=[vm], config={"sync_vms": True, "vm_hostgroup_format": "site/role"}
+        )
+
+        syncer.start()
+
+        self.assertEqual(
+            syncer.last_unsynced_summary.failures["missing Zabbix config context"],
+            ["VM no-zabbix-context"],
+        )
+
+    def test_reports_oob_and_lifecycle_skips_separately(self):
+        device = MockNetboxDevice(
+            name="retired-router",
+            status_label="Decommissioning",
+            config_context={"zabbix": {"oob": {}}},
+        )
+        syncer = self._syncer(devices=[device])
+
+        syncer.start()
+
+        self.assertEqual(
+            syncer.last_unsynced_summary.failures["missing OOB IP"],
+            ["Device OOB retired-router-oob"],
+        )
+        self.assertEqual(
+            syncer.last_unsynced_summary.intentional[
+                "excluded due to NetBox status Decommissioning"
+            ],
+            ["Device retired-router"],
+        )
+
+    def test_logs_zero_count_summary(self):
+        summary = UnsyncedSummary()
+
+        with self.assertLogs("NetBox-Zabbix-sync", level="WARNING") as log_context:
+            summary.log(logger)
+
+        self.assertIn("no unsynced devices, VMs, or OOB imports", log_context.output[0])
+
+    def test_records_unclassified_sync_errors(self):
+        syncer = Sync()
+        summary = UnsyncedSummary()
+
+        syncer._record_sync_error(summary, "Device unexpected", SyncError("unexpected"))
+
+        self.assertEqual(
+            summary.failures["unclassified sync error"], ["Device unexpected"]
+        )

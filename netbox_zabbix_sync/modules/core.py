@@ -1,6 +1,7 @@
 """Core component of the sync process"""
 
 import ssl
+from collections import defaultdict
 from contextlib import suppress
 from os import environ
 from pprint import pformat
@@ -24,6 +25,51 @@ from netbox_zabbix_sync.modules.tools import (
 from netbox_zabbix_sync.modules.virtual_machine import VirtualMachine
 
 logger = get_logger()
+
+
+class UnsyncedSummary:
+    """Collect NetBox objects that did not end the run as synced Zabbix hosts."""
+
+    def __init__(self):
+        self.failures: dict[str, list[str]] = defaultdict(list)
+        self.intentional: dict[str, list[str]] = defaultdict(list)
+
+    def record(self, label: str, reason: str, *, intentional: bool = False):
+        """Record one object once for a stable, operator-facing reason."""
+        records = self.intentional if intentional else self.failures
+        if label not in records[reason]:
+            records[reason].append(label)
+
+    def log(self, log):
+        """Write the end-of-run summary at warning level for normal job logs."""
+        failed = sum(len(labels) for labels in self.failures.values())
+        intentional = sum(len(labels) for labels in self.intentional.values())
+        total = failed + intentional
+        if not total:
+            log.warning(
+                "NetBox-to-Zabbix sync summary: no unsynced devices, VMs, or OOB imports."
+            )
+            return
+
+        log.warning(
+            "NetBox-to-Zabbix sync summary: %s unsynced target(s) "
+            "(%s failed, %s intentionally excluded or removed).",
+            total,
+            failed,
+            intentional,
+        )
+        for category, records in (
+            ("Failed", self.failures),
+            ("Intentional", self.intentional),
+        ):
+            for reason in sorted(records):
+                log.warning(
+                    "  %s - %s (%s): %s",
+                    category,
+                    reason,
+                    len(records[reason]),
+                    ", ".join(sorted(records[reason])),
+                )
 
 
 class Sync:
@@ -51,6 +97,7 @@ class Sync:
         }
 
         self.config: dict[str, Any] = combined_config
+        self.last_unsynced_summary: UnsyncedSummary | None = None
 
     def _combine_filters(self, config_filter, method_filter):
         """
@@ -72,14 +119,72 @@ class Sync:
             suffix = "-oob"
         return f"{prefix}{primary_name}{suffix}"
 
-    def _get_device_imports(self, nb_device):
+    @staticmethod
+    def _summary_label(object_type: str, name: str):
+        """Build a concise, type-qualified name for the operator summary."""
+        return f"{object_type} {name}"
+
+    def _record_sync_error(self, summary, label, error):
+        """Translate expected sync exceptions into stable report categories."""
+        message = str(error).lower()
+        if "no primary ip" in message:
+            reason = "no primary IP"
+        elif "custom field" in message and "not present" in message:
+            reason = "missing Zabbix host ID custom field"
+        elif "key 'zabbix' not found" in message:
+            reason = "missing Zabbix config context"
+        elif "key 'templates' not found" in message:
+            reason = "missing Zabbix templates in config context"
+        elif "template" in message and "unable to find" in message:
+            reason = "configured Zabbix template is unavailable"
+        elif "hostgroup" in message:
+            reason = "no usable Zabbix hostgroup"
+        elif "interface" in message:
+            reason = "invalid Zabbix interface configuration"
+        elif "virtual chassis" in message and "master" in message:
+            reason = "virtual chassis has no primary member"
+        elif type(error).__name__ == "SyncExternalError":
+            reason = "external NetBox or Zabbix sync error"
+        else:
+            reason = "unclassified sync error"
+        summary.record(label, reason)
+
+    @staticmethod
+    def _template_skip_reason(nb_object, config, *, vm=False):
+        """Return a stable reason when template selection leaves no templates."""
+        context = getattr(nb_object, "config_context", {})
+        context_required = vm or config["templates_config_context"]
+        if context_required:
+            if not isinstance(context, dict) or "zabbix" not in context:
+                return "missing Zabbix config context"
+            zabbix_context = context["zabbix"]
+            if not isinstance(zabbix_context, dict):
+                return "invalid Zabbix config context"
+            if "templates" not in zabbix_context:
+                return "missing Zabbix templates in config context"
+            if not zabbix_context["templates"]:
+                return "no Zabbix templates configured"
+        if not vm and not config["templates_config_context_overrule"]:
+            device_type_cfs = getattr(nb_object.device_type, "custom_fields", {})
+            if config["template_cf"] not in device_type_cfs:
+                return "missing device-type Zabbix template custom field"
+        return "no Zabbix templates configured"
+
+    def _get_device_imports(self, nb_device, summary):
         """Return effective NetBox objects/configs for primary and optional OOB imports."""
         zabbix_context = nb_device.config_context.get("zabbix", {})
         primary_config = self.config
         if "templates" in zabbix_context:
             primary_config = self.config.copy()
             primary_config["templates_config_context_overrule"] = True
-        imports = [(nb_device, primary_config, False)]
+        imports = [
+            (
+                nb_device,
+                primary_config,
+                False,
+                self._summary_label("Device", nb_device.name),
+            )
+        ]
         oob_context = zabbix_context.get("oob")
         if oob_context is None:
             return imports
@@ -88,12 +193,22 @@ class Sync:
                 "Host %s: zabbix.oob is not a dictionary, skipping OOB import.",
                 nb_device.name,
             )
+            summary.record(
+                self._summary_label("Device OOB", nb_device.name),
+                "invalid OOB Zabbix config context",
+            )
             return imports
 
         if not nb_device.oob_ip:
             logger.warning(
                 "Host %s: zabbix.oob is configured but oob_ip is missing, skipping OOB import.",
                 nb_device.name,
+            )
+            summary.record(
+                self._summary_label(
+                    "Device OOB", self._build_oob_hostname(nb_device.name, oob_context)
+                ),
+                "missing OOB IP",
             )
             return imports
 
@@ -115,6 +230,9 @@ class Sync:
                 ),
                 effective_config,
                 True,
+                self._summary_label(
+                    "Device OOB", self._build_oob_hostname(nb_device.name, oob_context)
+                ),
             )
         )
         return imports
@@ -129,6 +247,8 @@ class Sync:
         zabbix_groups,
         zabbix_templates,
         zabbix_proxy_list,
+        summary,
+        summary_label,
         split_import=False,
     ):
         """Run the physical device sync pipeline for one effective device import."""
@@ -148,6 +268,10 @@ class Sync:
         )
         # Check if a valid template has been found for this device.
         if not device.zbx_template_names:
+            summary.record(
+                summary_label,
+                self._template_skip_reason(nb_device, device_config),
+            )
             return True
         device.set_hostgroup(
             device_config["hostgroup_format"], netbox_site_groups, netbox_regions
@@ -158,6 +282,7 @@ class Sync:
                 "Host %s: has no valid hostgroups, Skipping this host...",
                 device.name,
             )
+            summary.record(summary_label, "no usable Zabbix hostgroup")
             return True
         if device_config["extended_site_properties"] and nb_device.site:
             logger.debug("Host %s: extending site information.", device.name)
@@ -189,6 +314,11 @@ class Sync:
                     "Host %s: Is part of cluster but not primary. Skipping this host...",
                     device.name,
                 )
+                summary.record(
+                    summary_label,
+                    "non-primary virtual chassis member",
+                    intentional=True,
+                )
                 return True
         # Checks if device is in cleanup state
         if device.status in device_config["zabbix_device_removal"]:
@@ -196,11 +326,21 @@ class Sync:
                 # Delete device from Zabbix and remove hostID from NetBox.
                 device.cleanup()
                 logger.info("Host %s: cleanup complete", device.name)
+                summary.record(
+                    summary_label,
+                    f"removed due to NetBox status {device.status}",
+                    intentional=True,
+                )
                 return True
             # Device has been added to NetBox but is not in Activate state
             logger.info(
                 "Host %s: Skipping since this host is not in the active state.",
                 device.name,
+            )
+            summary.record(
+                summary_label,
+                f"excluded due to NetBox status {device.status}",
+                intentional=True,
             )
             return True
         # Check if the device is in the disabled state
@@ -235,6 +375,8 @@ class Sync:
             return True
         # Add device to Zabbix
         device.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
+        if not device.zabbix_id:
+            summary.record(summary_label, "Zabbix host already exists without NetBox linkage")
 
     def _process_azure_subscription(
         self,
@@ -398,6 +540,8 @@ class Sync:
             e = "Not able to start sync: No connection to NetBox or Zabbix API."
             logger.error(e)
             return False
+        summary = UnsyncedSummary()
+        self.last_unsynced_summary = summary
         device_cfs = []
         vm_cfs = []
         # Create API call to get all custom fields which are on the device objects
@@ -481,6 +625,7 @@ class Sync:
 
         # Go through all NetBox devices
         for nb_vm in netbox_vms:
+            summary_label = self._summary_label("VM", nb_vm.name)
             try:
                 vm = VirtualMachine(
                     nb_vm,
@@ -495,6 +640,10 @@ class Sync:
                 vm.set_vm_template()
                 # Check if a valid template has been found for this VM.
                 if not vm.zbx_template_names:
+                    summary.record(
+                        summary_label,
+                        self._template_skip_reason(nb_vm, self.config, vm=True),
+                    )
                     continue
                 vm.set_hostgroup(
                     self.config["vm_hostgroup_format"],
@@ -503,6 +652,7 @@ class Sync:
                 )
                 # Check if a valid hostgroup has been found for this VM.
                 if not vm.hostgroups:
+                    summary.record(summary_label, "no usable Zabbix hostgroup")
                     continue
                 if self.config["extended_site_properties"] and nb_vm.site:
                     logger.debug("Host %s: extending site information.", vm.name)
@@ -523,12 +673,22 @@ class Sync:
                         # and remove hostID from self.netbox.
                         vm.cleanup()
                         logger.info("Host %s: cleanup complete", vm.name)
+                        summary.record(
+                            summary_label,
+                            f"removed due to NetBox status {vm.status}",
+                            intentional=True,
+                        )
                         continue
                     # Device has been added to NetBox
                     # but is not in Activate state
                     logger.info(
                         "Host %s: Skipping since this host is not in the active state.",
                         vm.name,
+                    )
+                    summary.record(
+                        summary_label,
+                        f"excluded due to NetBox status {vm.status}",
+                        intentional=True,
                     )
                     continue
                 # Check if the VM is in the disabled state
@@ -563,14 +723,22 @@ class Sync:
                     continue
                 # Add VM to Zabbix
                 vm.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
-            except SyncError:
-                pass
+                if not vm.zabbix_id:
+                    summary.record(
+                        summary_label,
+                        "Zabbix host already exists without NetBox linkage",
+                    )
+            except SyncError as error:
+                self._record_sync_error(summary, summary_label, error)
 
         for nb_device in netbox_devices:
-            for device_import, device_config, split_import in self._get_device_imports(
-                nb_device
-            ):
-                with suppress(SyncError):
+            for (
+                device_import,
+                device_config,
+                split_import,
+                summary_label,
+            ) in self._get_device_imports(nb_device, summary):
+                try:
                     self._process_device(
                         device_import,
                         device_config,
@@ -580,6 +748,11 @@ class Sync:
                         zabbix_groups,
                         zabbix_templates,
                         zabbix_proxy_list,
+                        summary,
+                        summary_label,
                         split_import=split_import,
                     )
+                except SyncError as error:
+                    self._record_sync_error(summary, summary_label, error)
+        summary.log(logger)
         return True

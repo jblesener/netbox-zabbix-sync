@@ -153,6 +153,15 @@ Note that not all filtering capabilities and properties of devices are
 applicable to VM's and vice-versa. Check the NetBox API documentation to see
 which filtering options are available for each object type.
 
+## Unsynced object summary
+
+At the end of every run, the syncer writes a warning-level summary of selected
+NetBox devices, VMs, and OOB split imports that did not end up synced to
+Zabbix. Entries are grouped by reason and list the affected object names.
+Intentional exclusions, such as decommissioned objects and non-primary virtual
+chassis members, are reported separately from sync failures. The summary covers
+only objects returned by the configured NetBox filters.
+
 ## Azure Subscription Syncing
 
 Azure subscriptions can be synced from NetBox Tenants. The sync only
