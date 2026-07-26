@@ -46,6 +46,19 @@ docker run -d -t -i -v $(pwd)/config.py:/opt/netbox-zabbix/config.py ...
 git clone https://github.com/TheNetworkGuy/netbox-zabbix-sync.git
 ```
 
+### Development setup
+
+Install the development dependencies and enable the formatting hook once per
+clone:
+
+```sh
+uv sync --dev
+uv run pre-commit install
+```
+
+Before each commit, the hook runs `uv run ruff format` across the repository.
+If it reformats a file, review and stage the change, then commit again.
+
 ### Packages
 
 Make sure that you have a python environment with the following packages

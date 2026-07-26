@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: Format with Ruff
+        entry: uv run ruff format
+        language: system
+        pass_filenames: false
