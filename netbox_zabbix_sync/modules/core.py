@@ -376,7 +376,9 @@ class Sync:
         # Add device to Zabbix
         device.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
         if not device.zabbix_id:
-            summary.record(summary_label, "Zabbix host already exists without NetBox linkage")
+            summary.record(
+                summary_label, "Zabbix host already exists without NetBox linkage"
+            )
 
     def _process_azure_subscription(
         self,
