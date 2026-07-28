@@ -2,7 +2,7 @@
 
 import unittest
 from typing import ClassVar
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from zabbix_utils import APIRequestError
@@ -2399,6 +2399,100 @@ class TestAdoptExistingHosts(unittest.TestCase):
         self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
         mock_zabbix.host.create.assert_not_called()
         mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopted_vmware_lld_vm_preserves_discovery_owned_fields(
+        self, mock_api, mock_zabbix_api
+    ):
+        """VMware LLD hosts retain their UUID and LLD template/group links."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        vm = MockNetboxVM(
+            name="adprd-admin1",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [
+                {
+                    "hostid": "77",
+                    "host": "50332e03-e109-e2bd-b8ed-c180f04dd1c0",
+                    "name": "adprd-admin1",
+                }
+            ],
+            [],
+            [
+                {
+                    "hostid": "77",
+                    "host": "50332e03-e109-e2bd-b8ed-c180f04dd1c0",
+                    "name": "adprd-admin1",
+                    "flags": "4",
+                    "hostDiscovery": {"parent_hostid": "300"},
+                    "parentTemplates": [
+                        {"templateid": "99", "link_type": "1"},
+                        {"templateid": "2", "link_type": "0"},
+                    ],
+                    "hostgroups": [
+                        {"groupid": "20", "flags": "0"},
+                        {"groupid": "2", "flags": "0"},
+                    ],
+                    "groups": [
+                        {"groupid": "20", "flags": "0"},
+                        {"groupid": "2", "flags": "0"},
+                    ],
+                    "status": "1",
+                    "interfaces": [{}],
+                    "inventory_mode": "-1",
+                    "inventory": {},
+                    "macros": [],
+                    "tags": [],
+                    "proxy_hostid": "0",
+                    "proxyid": "0",
+                    "proxy_groupid": "0",
+                }
+            ],
+        ]
+        mock_zabbix.hostprototype.get.return_value = [
+            {"hostid": "300", "groupLinks": [{"groupid": "20"}]}
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.create.assert_not_called()
+        self.assertEqual(
+            mock_zabbix.host.update.call_args_list,
+            [
+                call(
+                    hostid=77,
+                    templates_clear=[{"templateid": "2"}],
+                    templates=[{"templateid": "99"}, {"templateid": "1"}],
+                ),
+                call(
+                    hostid=77,
+                    groups=[{"groupid": "20"}, {"groupid": "1"}],
+                ),
+            ],
+        )
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")

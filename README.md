@@ -268,9 +268,14 @@ Behavior:
   or tag contains one of `azure_vm_platform_keywords` (default: `["azure"]`).
 - A unique name match in Zabbix is required. If multiple hosts match, adoption
   is skipped for safety.
+- LLD-created hosts (including VMware-discovered VMs) retain discovery-owned
+  fields: technical and visible names, LLD-linked templates, prototype groups,
+  automatic tags/macros, and scalar host settings. NetBox still reconciles
+  manually linked templates, groups, tags, and macros without removing the
+  discovery-owned entries.
 - Azure VM hosts linked to `azure_vm_discovered_templates` (default:
-  `["Azure Virtual Machine by HTTP"]`) are treated as discovery-owned and use
-  metadata-only enrichment after adoption.
+  `["Azure Virtual Machine by HTTP"]`) continue to use metadata-only
+  enrichment after adoption.
 - On successful adoption, the script writes the matched `hostid` into the
   configured NetBox custom field (`device_cf`, or `oob_device_cf` for OOB
   split imports).

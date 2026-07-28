@@ -654,6 +654,211 @@ class PhysicalDevice:
         )
         return True
 
+    @staticmethod
+    def _is_discovered_host(host):
+        """Return whether Zabbix created this host from an LLD host prototype."""
+        return str(host.get("flags", "0")) == "4"
+
+    def _discovered_host_group_ids(self, host):
+        """Return host groups owned by LLD, or ``None`` when they cannot be read."""
+        group_dictname = "hostgroups"
+        if str(self.zabbix.version).startswith(("6", "5")):
+            group_dictname = "groups"
+
+        protected = {
+            str(group["groupid"])
+            for group in host.get(group_dictname, [])
+            if str(group.get("flags", "0")) == "4"
+        }
+        discovery = host.get("hostDiscovery") or {}
+        prototype_id = discovery.get("parent_hostid")
+        if not prototype_id:
+            return protected
+
+        try:
+            prototypes = self.zabbix.hostprototype.get(
+                hostids=prototype_id,
+                output=["hostid"],
+                selectGroupLinks=["groupid"],
+            )
+        except APIRequestError as e:
+            self.logger.warning(
+                "Host %s: Unable to read LLD host prototype groups; preserving all "
+                "existing host groups. Zabbix returned %s.",
+                self.name,
+                e,
+            )
+            return None
+
+        for prototype in prototypes:
+            protected.update(
+                str(group["groupid"]) for group in prototype.get("groupLinks", [])
+            )
+        return protected
+
+    @staticmethod
+    def _unique_by_key(items, key):
+        """Return entries in order, keeping the first entry for each key."""
+        unique_items = []
+        seen = set()
+        for item in items:
+            item_key = key(item)
+            if item_key not in seen:
+                unique_items.append(item)
+                seen.add(item_key)
+        return unique_items
+
+    def _sync_discovered_templates(self, host):
+        """Sync manual templates without unlinking templates assigned by LLD."""
+        current = host["parentTemplates"]
+        lld_templates = [
+            {"templateid": template["templateid"]}
+            for template in current
+            if str(template.get("link_type", "0")) == "1"
+        ]
+        desired = self._unique_by_key(
+            lld_templates
+            + [
+                {"templateid": template["templateid"]}
+                for template in self.zbx_templates
+            ],
+            lambda template: str(template["templateid"]),
+        )
+        current_ids = {str(template["templateid"]) for template in current}
+        desired_ids = {str(template["templateid"]) for template in desired}
+        if current_ids == desired_ids:
+            self.logger.debug("Host %s: Template(s) in-sync.", self.name)
+            return
+
+        templates_clear = [
+            {"templateid": template["templateid"]}
+            for template in current
+            if str(template.get("link_type", "0")) != "1"
+            and str(template["templateid"]) not in desired_ids
+        ]
+        self.logger.info("Host %s: Template(s) OUT of sync.", self.name)
+        self.update_zabbix_host(templates_clear=templates_clear, templates=desired)
+
+    def _sync_discovered_groups(self, host):
+        """Sync manual groups without unlinking groups assigned by LLD."""
+        protected_ids = self._discovered_host_group_ids(host)
+        if protected_ids is None:
+            return
+
+        group_dictname = "hostgroups"
+        if str(self.zabbix.version).startswith(("6", "5")):
+            group_dictname = "groups"
+        current = host[group_dictname]
+        desired = self._unique_by_key(
+            [
+                {"groupid": group["groupid"]}
+                for group in current
+                if str(group["groupid"]) in protected_ids
+            ]
+            + self.group_ids,
+            lambda group: str(group["groupid"]),
+        )
+        current_ids = {str(group["groupid"]) for group in current}
+        desired_ids = {str(group["groupid"]) for group in desired}
+        if current_ids == desired_ids:
+            self.logger.debug("Host %s: Hostgroups in-sync.", self.name)
+            return
+
+        self.logger.info("Host %s: Hostgroups OUT of sync.", self.name)
+        self.update_zabbix_host(groups=desired)
+
+    def _sync_discovered_macros(self, host):
+        """Sync manual macros without deleting macros created by LLD."""
+        if not self.config["usermacro_sync"]:
+            return
+
+        automatic = [
+            macro for macro in host["macros"] if str(macro.get("automatic", "0")) == "1"
+        ]
+        automatic_names = {macro["macro"] for macro in automatic}
+        netbox_macros = [
+            macro for macro in self.usermacros if macro["macro"] not in automatic_names
+        ]
+        for macro in self.usermacros:
+            if macro["macro"] in automatic_names:
+                self.logger.warning(
+                    "Host %s: Preserving LLD macro %s instead of replacing it from NetBox.",
+                    self.name,
+                    macro["macro"],
+                )
+
+        sync_mode = str(self.config["usermacro_sync"]).lower()
+        if sync_mode == "partial":
+            manual = [
+                macro
+                for macro in host["macros"]
+                if str(macro.get("automatic", "0")) != "1"
+            ]
+            netbox_macros = ZabbixUsermacros.merge_partial(manual, netbox_macros)
+
+        update_macros = automatic + netbox_macros
+        compare_macros = deepcopy(update_macros)
+        if sync_mode != "full":
+            for macro in compare_macros:
+                if macro.get("type") == str(1):
+                    macro.pop("value", None)
+
+        def comparable(macro):
+            return {
+                key: str(macro.get(key, "0" if key == "automatic" else ""))
+                for key in ("macro", "value", "type", "description", "automatic")
+            }
+
+        current = sorted(
+            (comparable(macro) for macro in host["macros"]), key=itemgetter("macro")
+        )
+        expected = sorted(
+            (comparable(macro) for macro in compare_macros), key=itemgetter("macro")
+        )
+        if current == expected:
+            self.logger.debug("Host %s: Usermacros in-sync.", self.name)
+            return
+
+        self.logger.info("Host %s: Usermacros OUT of sync.", self.name)
+        self.update_zabbix_host(macros=update_macros)
+
+    def _sync_discovered_tags(self, host):
+        """Sync manual tags without deleting tags created by LLD."""
+        if not self.config["tag_sync"]:
+            return
+
+        automatic = [
+            {"tag": tag["tag"], "value": tag["value"]}
+            for tag in host["tags"]
+            if str(tag.get("automatic", "0")) == "1"
+        ]
+        desired = self._unique_by_key(
+            automatic + self.tags,
+            lambda tag: (tag["tag"], tag["value"]),
+        )
+        current = sorted(
+            ({"tag": tag["tag"], "value": tag["value"]} for tag in host["tags"]),
+            key=lambda tag: (tag["tag"], tag["value"]),
+        )
+        expected = sorted(desired, key=lambda tag: (tag["tag"], tag["value"]))
+        if current == expected:
+            self.logger.debug("Host %s: Tags in-sync.", self.name)
+            return
+
+        self.logger.info("Host %s: Tags OUT of sync.", self.name)
+        self.update_zabbix_host(tags=desired)
+
+    def _sync_discovered_host(self, host):
+        """Reconcile the NetBox-managed parts of an LLD-created host."""
+        self.logger.info(
+            "Host %s: Preserving fields managed by Zabbix low-level discovery.",
+            self.name,
+        )
+        self._sync_discovered_templates(host)
+        self._sync_discovered_groups(host)
+        self._sync_discovered_macros(host)
+        self._sync_discovered_tags(host)
+
     def set_interface_details(self):
         """
         Checks interface parameters from NetBox and
@@ -1039,12 +1244,20 @@ class PhysicalDevice:
         host = self.zabbix.host.get(
             filter={"hostid": self.zabbix_id},
             selectInterfaces=["type", "ip", "port", "details", "interfaceid"],
-            selectGroups=["groupid"],
-            selectHostGroups=["groupid"],
-            selectParentTemplates=["templateid"],
+            selectGroups=["groupid", "flags"],
+            selectHostGroups=["groupid", "flags"],
+            selectHostDiscovery=["parent_hostid"],
+            selectParentTemplates=["templateid", "link_type"],
             selectInventory=list(self._inventory_map().values()),
-            selectMacros=["macro", "value", "type", "description"],
-            selectTags=["tag", "value"],
+            selectMacros=[
+                "hostmacroid",
+                "macro",
+                "value",
+                "type",
+                "description",
+                "automatic",
+            ],
+            selectTags=["tag", "value", "automatic"],
         )
         if len(host) > 1:
             e = (
@@ -1062,6 +1275,11 @@ class PhysicalDevice:
             self.logger.error(e)
             raise SyncInventoryError(e)
         host = host[0]
+        discovered_host = full_sync and self._is_discovered_host(host)
+        if discovered_host:
+            self._sync_discovered_host(host)
+            full_sync = False
+
         if full_sync:
             if host["host"] == self.name:
                 self.logger.debug("Host %s: Hostname in-sync.", self.name)
@@ -1176,22 +1394,24 @@ class PhysicalDevice:
                     )
                 if not proxy_set:
                     self.logger.debug("Host %s: Proxy in-sync.", self.name)
-        # Check host inventory mode
-        if str(host["inventory_mode"]) == str(self.inventory_mode):
-            self.logger.debug("Host %s: inventory_mode in-sync.", self.name)
-        else:
-            self.logger.info("Host %s: inventory_mode OUT of sync.", self.name)
-            self.update_zabbix_host(inventory_mode=str(self.inventory_mode))
-        if self.config["inventory_sync"] and self.inventory_mode in [0, 1]:
-            # Check host inventory mapping
-            if host["inventory"] == self.inventory:
-                self.logger.debug("Host %s: Inventory in-sync.", self.name)
+        # Inventory and TLS can be set by an LLD host prototype, so leave them
+        # untouched for discovered hosts along with other scalar host settings.
+        if not discovered_host:
+            if str(host["inventory_mode"]) == str(self.inventory_mode):
+                self.logger.debug("Host %s: inventory_mode in-sync.", self.name)
             else:
-                self.logger.info("Host %s: Inventory OUT of sync.", self.name)
-                self.update_zabbix_host(inventory=self.inventory)
+                self.logger.info("Host %s: inventory_mode OUT of sync.", self.name)
+                self.update_zabbix_host(inventory_mode=str(self.inventory_mode))
+            if self.config["inventory_sync"] and self.inventory_mode in [0, 1]:
+                # Check host inventory mapping
+                if host["inventory"] == self.inventory:
+                    self.logger.debug("Host %s: Inventory in-sync.", self.name)
+                else:
+                    self.logger.info("Host %s: Inventory OUT of sync.", self.name)
+                    self.update_zabbix_host(inventory=self.inventory)
 
         # Check host TLS / encryption settings
-        if self.config["tls_sync"] and self.tls:
+        if not discovered_host and self.config["tls_sync"] and self.tls:
             # tls_psk is write-only and never returned by host.get, so it can't
             # be compared. All other resolved keys are checked as strings.
             tls_in_sync = all(
@@ -1207,7 +1427,7 @@ class PhysicalDevice:
                 self.update_zabbix_host(**self.tls)
 
         # Check host usermacros
-        if self.config["usermacro_sync"]:
+        if not discovered_host and self.config["usermacro_sync"]:
             # Make a full copy since we dont want to lose the original value
             # of secret type macros from Netbox
             netbox_macros = deepcopy(self.usermacros)
@@ -1249,7 +1469,7 @@ class PhysicalDevice:
                 self.update_zabbix_host(macros=update_macros)
 
         # Check host tags
-        if self.config["tag_sync"]:
+        if not discovered_host and self.config["tag_sync"]:
             if remove_duplicates(
                 host["tags"], lambda tag: f"{tag['tag']}{tag['value']}"
             ) == remove_duplicates(
