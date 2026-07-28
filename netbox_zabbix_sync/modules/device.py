@@ -104,7 +104,7 @@ class PhysicalDevice:
         self.inventory_mode = -1
         self.inventory = {}
         self.usermacros = []
-        self.tags = {}
+        self.tags: list[dict[str, Any]] = []
         self.tls = {}
         self.adopted_azure_discovered_host = False
         self.logger = logger if logger else getLogger(__name__)

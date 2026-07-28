@@ -6,3 +6,8 @@ repos:
         entry: uv run ruff format
         language: system
         pass_filenames: false
+      - id: ty-check
+        name: Type check with ty
+        entry: uv run ty check
+        language: system
+        pass_filenames: false

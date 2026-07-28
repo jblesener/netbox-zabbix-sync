@@ -56,7 +56,8 @@ uv sync --dev
 uv run pre-commit install
 ```
 
-Before each commit, the hook runs `uv run ruff format` across the repository.
+Before each commit, the hook formats the repository with `uv run ruff format`
+and runs `uv run ty check`.
 If it reformats a file, review and stage the change, then commit again.
 
 ### Packages
