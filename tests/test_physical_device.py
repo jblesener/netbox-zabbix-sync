@@ -308,6 +308,35 @@ class TestPhysicalDevice(unittest.TestCase):
             device.inventory, {"name": "test-device", "serialno_a": "ABC123"}
         )
 
+    def test_set_inventory_truncates_type_to_zabbix_limit(self):
+        """Test inventory type values longer than Zabbix's limit are truncated."""
+        device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={
+                "device_cf": "zabbix_hostid",
+                "inventory_mode": "manual",
+                "inventory_sync": True,
+                "device_inventory_map": {"device_type/model": "type"},
+            },
+        )
+        model = "NetShelter Metered-by-Outlet with Switching Rack PDU, 2G, 0U, 20A"
+
+        result = device.set_inventory({"device_type": {"model": model}})
+
+        self.assertTrue(result)
+        self.assertEqual(device.inventory["type"], model[:64])
+        self.assertEqual(len(device.inventory["type"]), 64)
+        self.mock_logger.warning.assert_called_once_with(
+            "Host %s: Truncating Zabbix inventory type from %s to %s characters.",
+            "test-device",
+            len(model),
+            64,
+        )
+
     def test_iscluster_true(self):
         """Test isCluster when device is part of a cluster."""
         # Set up virtual_chassis

@@ -33,6 +33,7 @@ from netbox_zabbix_sync.modules.usermacros import ZabbixUsermacros
 # Zabbix encryption modes mapped to their API integer values.
 # tls_connect uses a single value; tls_accept is an OR-summed bitmask.
 TLS_MODES = {"none": 1, "psk": 2, "cert": 4}
+ZABBIX_INVENTORY_TYPE_MAX_LENGTH = 64
 
 
 class NetboxDeviceImport:
@@ -289,6 +290,20 @@ class PhysicalDevice:
             self.inventory = field_mapper(
                 self.name, self._inventory_map(), nbdevice, self.logger
             )
+            inventory_type = self.inventory.get("type")
+            if (
+                isinstance(inventory_type, str)
+                and len(inventory_type) > ZABBIX_INVENTORY_TYPE_MAX_LENGTH
+            ):
+                self.logger.warning(
+                    "Host %s: Truncating Zabbix inventory type from %s to %s characters.",
+                    self.name,
+                    len(inventory_type),
+                    ZABBIX_INVENTORY_TYPE_MAX_LENGTH,
+                )
+                self.inventory["type"] = inventory_type[
+                    :ZABBIX_INVENTORY_TYPE_MAX_LENGTH
+                ]
             self.logger.debug(
                 "Host %s: Resolved inventory: %s", self.name, self.inventory
             )
