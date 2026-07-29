@@ -48,6 +48,10 @@ _BOOL_ARGS = [
     ("usermacro_sync", "Sync usermacros from NetBox to Zabbix."),
     ("tag_sync", "Sync host tags to Zabbix."),
     ("tag_lower", "Lowercase tag names and values before syncing."),
+    (
+        "cleanup_deleted_hosts",
+        "Delete this deployment's marked Zabbix hosts when their NetBox source no longer exists.",
+    ),
 ]
 
 # String settings that can be set via --option VALUE
@@ -122,6 +126,11 @@ _STR_ARGS = [
         "tag_value",
         "NetBox tag property to use as the Zabbix tag value (name, slug, or display).",
         "PROPERTY",
+    ),
+    (
+        "cleanup_instance_id",
+        "Unique deployment ID used to namespace deleted-source cleanup ownership.",
+        "ID",
     ),
 ]
 

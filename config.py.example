@@ -205,6 +205,15 @@ tag_name = 'NetBox'
 # 'name'is used by default.
 tag_value = "name"
 
+## Deleted-source host cleanup (opt-in)
+# When enabled, hosts marked by this sync deployment are deleted from Zabbix
+# after their source device, OOB device import, or VM no longer exists in
+# NetBox. This does not use nb_device_filter or nb_vm_filter for existence
+# checks. Use a unique cleanup_instance_id for every deployment that shares a
+# Zabbix instance.
+cleanup_deleted_hosts = False
+cleanup_instance_id = "default"
+
 # device tag_map to map NetBox fields to host tags.
 device_tag_map = {"site/name": "site",
                   "rack/name": "rack",

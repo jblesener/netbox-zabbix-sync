@@ -25,7 +25,6 @@ from netbox_zabbix_sync.modules.tags import ZabbixTags
 from netbox_zabbix_sync.modules.tools import (
     cf_to_string,
     field_mapper,
-    remove_duplicates,
     sanatize_log_output,
 )
 from netbox_zabbix_sync.modules.usermacros import ZabbixUsermacros
@@ -34,6 +33,8 @@ from netbox_zabbix_sync.modules.usermacros import ZabbixUsermacros
 # tls_connect uses a single value; tls_accept is an OR-summed bitmask.
 TLS_MODES = {"none": 1, "psk": 2, "cert": 4}
 ZABBIX_INVENTORY_TYPE_MAX_LENGTH = 64
+CLEANUP_INSTANCE_TAG = "netbox-zabbix-sync-instance"
+CLEANUP_SOURCE_TAG = "netbox-zabbix-sync-source"
 
 
 class NetboxDeviceImport:
@@ -105,6 +106,7 @@ class PhysicalDevice:
         self.inventory = {}
         self.usermacros = []
         self.tags: list[dict[str, Any]] = []
+        self.cleanup_source_marker = None
         self.tls = {}
         self.adopted_azure_discovered_host = False
         self.logger = logger if logger else getLogger(__name__)
@@ -127,6 +129,65 @@ class PhysicalDevice:
     def _tag_map(self):
         """Use device host tag maps"""
         return self.config["device_tag_map"]
+
+    def set_cleanup_source(self, source_type):
+        """Associate this import with the source marker used by opt-in cleanup."""
+        if source_type not in {"device", "device-oob", "vm"}:
+            raise ValueError(f"Unsupported cleanup source type: {source_type}")
+        self.cleanup_source_marker = f"{source_type}:{self.id}"
+
+    @staticmethod
+    def _is_cleanup_tag(tag):
+        """Return whether a tag is reserved for deleted-source cleanup ownership."""
+        return tag.get("tag") in {CLEANUP_INSTANCE_TAG, CLEANUP_SOURCE_TAG}
+
+    @staticmethod
+    def _tag_values(tags):
+        """Normalize tags to the fields accepted by host.create/host.update."""
+        return [
+            {"tag": tag["tag"], "value": tag["value"]}
+            for tag in tags
+            if "tag" in tag and "value" in tag
+        ]
+
+    def _cleanup_ownership_tags(self):
+        """Return this deployment's ownership tags when cleanup is enabled."""
+        if (
+            not self.config.get("cleanup_deleted_hosts")
+            or not self.cleanup_source_marker
+        ):
+            return []
+        return [
+            {
+                "tag": CLEANUP_INSTANCE_TAG,
+                "value": str(self.config.get("cleanup_instance_id", "default")),
+            },
+            {"tag": CLEANUP_SOURCE_TAG, "value": self.cleanup_source_marker},
+        ]
+
+    def _tags_preserving_cleanup_ownership(self, existing_tags, desired_tags):
+        """Keep reserved tags even when normal NetBox tag sync is disabled later."""
+        protected = [tag for tag in existing_tags if self._is_cleanup_tag(tag)]
+        return self._unique_by_key(
+            self._tag_values(desired_tags) + self._tag_values(protected),
+            lambda tag: (tag["tag"], tag["value"]),
+        )
+
+    def _sync_cleanup_ownership(self, host):
+        """Backfill ownership tags without taking ownership of ordinary tags."""
+        desired = self._unique_by_key(
+            self._tag_values(host.get("tags", [])) + self._cleanup_ownership_tags(),
+            lambda tag: (tag["tag"], tag["value"]),
+        )
+        current = self._tag_values(host.get("tags", []))
+        if sorted(current, key=lambda tag: (tag["tag"], tag["value"])) == sorted(
+            desired, key=lambda tag: (tag["tag"], tag["value"])
+        ):
+            return
+        self.logger.info(
+            "Host %s: Adding deleted-source cleanup ownership tags.", self.name
+        )
+        self.update_zabbix_host(tags=desired)
 
     def _set_basics(self):
         """
@@ -833,7 +894,8 @@ class PhysicalDevice:
             if str(tag.get("automatic", "0")) == "1"
         ]
         desired = self._unique_by_key(
-            automatic + self.tags,
+            automatic
+            + self._tags_preserving_cleanup_ownership(host["tags"], self.tags),
             lambda tag: (tag["tag"], tag["value"]),
         )
         current = sorted(
@@ -1112,7 +1174,10 @@ class PhysicalDevice:
                 "inventory_mode": self.inventory_mode,
                 "inventory": self.inventory,
                 "macros": self.usermacros,
-                "tags": self.tags,
+                "tags": self._unique_by_key(
+                    self._tag_values(self.tags) + self._cleanup_ownership_tags(),
+                    lambda tag: (tag["tag"], tag["value"]),
+                ),
             }
             # Add TLS / encryption settings when tls_sync is enabled.
             # Empty when disabled, leaving Zabbix defaults untouched.
@@ -1211,6 +1276,7 @@ class PhysicalDevice:
         proxy_power,
         create_hostgroups,
         full_sync=True,
+        cleanup_ownership=False,
     ):
         """
         Checks if Zabbix object is still valid with NetBox parameters.
@@ -1470,15 +1536,22 @@ class PhysicalDevice:
 
         # Check host tags
         if not discovered_host and self.config["tag_sync"]:
-            if remove_duplicates(
-                host["tags"], lambda tag: f"{tag['tag']}{tag['value']}"
-            ) == remove_duplicates(
-                self.tags, lambda tag: f"{tag['tag']}{tag['value']}"
-            ):
+            desired_tags = self._tags_preserving_cleanup_ownership(
+                host["tags"],
+                self._tag_values(self.tags)
+                + (self._cleanup_ownership_tags() if cleanup_ownership else []),
+            )
+            if sorted(
+                self._tag_values(host["tags"]),
+                key=lambda tag: (tag["tag"], tag["value"]),
+            ) == sorted(desired_tags, key=lambda tag: (tag["tag"], tag["value"])):
                 self.logger.debug("Host %s: Tags in-sync.", self.name)
             else:
                 self.logger.info("Host %s: Tags OUT of sync.", self.name)
-                self.update_zabbix_host(tags=self.tags)
+                self.update_zabbix_host(tags=desired_tags)
+
+        if cleanup_ownership and not discovered_host and not self.config["tag_sync"]:
+            self._sync_cleanup_ownership(host)
 
         if full_sync:
             # If only 1 interface has been found

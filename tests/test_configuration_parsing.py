@@ -1,8 +1,10 @@
 """Tests for configuration parsing in the modules.config module."""
 
 import os
+from argparse import Namespace
 from unittest.mock import MagicMock, patch
 
+from netbox_zabbix_sync.modules.cli import _apply_cli_overrides
 from netbox_zabbix_sync.modules.settings import (
     DEFAULT_CONFIG,
     load_config,
@@ -48,6 +50,8 @@ def test_load_config_defaults():
             "Azure Virtual Machine by HTTP"
         ]
         assert config["azure_vm_resource_id_cf"] == ""
+        assert config["cleanup_deleted_hosts"] is False
+        assert config["cleanup_instance_id"] == "default"
 
 
 def test_load_config_file():
@@ -81,6 +85,10 @@ def test_load_env_variables():
             return True
         if key == "create_journal":
             return True
+        if key == "cleanup_deleted_hosts":
+            return "false"
+        if key == "cleanup_instance_id":
+            return "deployment-a"
         return None
 
     with (
@@ -96,6 +104,8 @@ def test_load_env_variables():
         config = load_config()
         assert config["sync_vms"] is True
         assert config["create_journal"] is True
+        assert config["cleanup_deleted_hosts"] is False
+        assert config["cleanup_instance_id"] == "deployment-a"
         # Unchanged values should remain as defaults
         assert config["templates_config_context"] is False
 
@@ -183,3 +193,15 @@ def test_load_env_variable_function():
             os.environ[test_var] = original_env
         else:
             os.environ.pop(test_var, None)
+
+
+def test_cleanup_options_can_be_overridden_on_the_cli():
+    config = DEFAULT_CONFIG.copy()
+
+    result = _apply_cli_overrides(
+        config,
+        Namespace(cleanup_deleted_hosts=True, cleanup_instance_id="deployment-a"),
+    )
+
+    assert result["cleanup_deleted_hosts"] is True
+    assert result["cleanup_instance_id"] == "deployment-a"

@@ -3,7 +3,11 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from netbox_zabbix_sync.modules.device import PhysicalDevice
+from netbox_zabbix_sync.modules.device import (
+    CLEANUP_INSTANCE_TAG,
+    CLEANUP_SOURCE_TAG,
+    PhysicalDevice,
+)
 from netbox_zabbix_sync.modules.exceptions import TemplateError
 
 
@@ -64,6 +68,33 @@ class TestPhysicalDevice(unittest.TestCase):
         self.assertEqual(self.device.status, "Active")
         self.assertEqual(self.device.ip, "192.168.1.1")
         self.assertEqual(self.device.cidr, "192.168.1.1/24")
+
+    def test_cleanup_ownership_tags_are_available_without_tag_sync(self):
+        self.device.config["cleanup_deleted_hosts"] = True
+        self.device.config["cleanup_instance_id"] = "deployment-a"
+        self.device.set_cleanup_source("device-oob")
+
+        assert self.device._cleanup_ownership_tags() == [
+            {"tag": CLEANUP_INSTANCE_TAG, "value": "deployment-a"},
+            {"tag": CLEANUP_SOURCE_TAG, "value": "device-oob:123"},
+        ]
+
+    def test_cleanup_tag_preservation_survives_normal_tag_sync(self):
+        existing = [
+            {"tag": "manual", "value": "keep"},
+            {"tag": CLEANUP_INSTANCE_TAG, "value": "deployment-a"},
+            {"tag": CLEANUP_SOURCE_TAG, "value": "device:123"},
+        ]
+
+        desired = self.device._tags_preserving_cleanup_ownership(
+            existing, [{"tag": "netbox", "value": "managed"}]
+        )
+
+        assert desired == [
+            {"tag": "netbox", "value": "managed"},
+            {"tag": CLEANUP_INSTANCE_TAG, "value": "deployment-a"},
+            {"tag": CLEANUP_SOURCE_TAG, "value": "device:123"},
+        ]
 
     def test_set_basics_with_unsupported_zabbix_hostname_characters(self):
         """Test _setBasics when hostname has chars unsupported by Zabbix host field."""

@@ -611,6 +611,25 @@ tag_sync = True
 tag_lower = True
 ```
 
+### Cleanup hosts whose NetBox source was deleted
+
+By default, the sync never removes a host merely because its NetBox device or
+VM is absent. To opt in, enable `cleanup_deleted_hosts`. The sync marks hosts
+it owns with reserved Zabbix tags and, on later runs, removes only marked hosts
+whose original NetBox device, OOB import, or VM no longer exists. Existing
+status-based removal behavior is unchanged.
+
+```python
+cleanup_deleted_hosts = True
+cleanup_instance_id = "tokyo-production"
+```
+
+Every deployment sharing a Zabbix instance must use a unique
+`cleanup_instance_id`. The full unfiltered NetBox device and VM inventories are
+used for this existence check, so normal sync filters do not cause deletion.
+Discovery-created and hosts adopted during the current run are never marked by
+this feature. Azure subscription hosts are not included.
+
 #### Device tags
 
 As NetBox doesn't follow the tag/value pattern for tags, we will need a tag

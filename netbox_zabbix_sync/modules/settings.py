@@ -90,6 +90,10 @@ DEFAULT_CONFIG = {
     "tag_lower": True,
     "tag_name": "NetBox",
     "tag_value": "name",
+    # Opt-in cleanup of hosts whose NetBox object no longer exists.  The
+    # instance ID namespaces ownership when several deployments use Zabbix.
+    "cleanup_deleted_hosts": False,
+    "cleanup_instance_id": "default",
     "device_tag_map": {
         "site/name": "site",
         "rack/name": "rack",
@@ -124,6 +128,16 @@ def load_config(config_file=None):
     for key in conf:
         value_setting = load_env_variable(key)
         if value_setting is not None:
+            # Environment variables are strings.  Parse boolean defaults so an
+            # explicit NBZX_CLEANUP_DELETED_HOSTS=False cannot accidentally
+            # enable a destructive cleanup pass.
+            if isinstance(conf[key], bool) and isinstance(value_setting, str):
+                value_setting = value_setting.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
             conf[key] = value_setting
     return conf
 

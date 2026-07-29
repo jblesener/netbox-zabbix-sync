@@ -5,7 +5,8 @@ from collections import defaultdict
 from contextlib import suppress
 from os import environ
 from pprint import pformat
-from typing import Any
+from re import fullmatch
+from typing import Any, cast
 
 from pynetbox import api as nbapi
 from pynetbox.core.query import RequestError as NetBoxRequestError
@@ -13,7 +14,12 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from zabbix_utils import APIRequestError, ProcessingError, ZabbixAPI
 
 from netbox_zabbix_sync.modules.azure_subscription import AzureSubscription
-from netbox_zabbix_sync.modules.device import NetboxDeviceImport, PhysicalDevice
+from netbox_zabbix_sync.modules.device import (
+    CLEANUP_INSTANCE_TAG,
+    CLEANUP_SOURCE_TAG,
+    NetboxDeviceImport,
+    PhysicalDevice,
+)
 from netbox_zabbix_sync.modules.exceptions import SyncError
 from netbox_zabbix_sync.modules.logging import get_logger
 from netbox_zabbix_sync.modules.settings import DEFAULT_CONFIG
@@ -72,6 +78,30 @@ class UnsyncedSummary:
                 )
 
 
+class CleanupSummary:
+    """Collect results from the opt-in deleted-source cleanup pass."""
+
+    def __init__(self):
+        self.removed: list[str] = []
+        self.failures: list[str] = []
+
+    def log(self, log):
+        if self.removed:
+            log.warning(
+                "Deleted-source cleanup removed %s host(s): %s",
+                len(self.removed),
+                ", ".join(self.removed),
+            )
+        if self.failures:
+            log.error(
+                "Deleted-source cleanup failed for %s host(s): %s",
+                len(self.failures),
+                ", ".join(self.failures),
+            )
+        if not self.removed and not self.failures:
+            log.info("Deleted-source cleanup completed without host removals.")
+
+
 class Sync:
     """
     Class that hosts the main sync process.
@@ -98,6 +128,7 @@ class Sync:
 
         self.config: dict[str, Any] = combined_config
         self.last_unsynced_summary: UnsyncedSummary | None = None
+        self.last_cleanup_summary: CleanupSummary | None = None
 
     def _combine_filters(self, config_filter, method_filter):
         """
@@ -148,6 +179,142 @@ class Sync:
         else:
             reason = "unclassified sync error"
         summary.record(label, reason)
+
+    @staticmethod
+    def _record_id(record: Any) -> int:
+        """Get an integer NetBox record ID from an API record or serialized dict."""
+        record_id: Any = (
+            record.get("id")
+            if isinstance(record, dict)
+            else getattr(record, "id", None)
+        )
+        if record_id is None:
+            raise ValueError("NetBox record is missing an ID")
+        return int(record_id)
+
+    @staticmethod
+    def _host_label(host):
+        """Build a stable Zabbix host label for cleanup logs and summaries."""
+        return str(host.get("host") or host.get("name") or host.get("hostid"))
+
+    def _cleanup_deleted_hosts(self):
+        """Remove only this deployment's marked hosts whose NetBox source vanished."""
+        if not self.config.get("cleanup_deleted_hosts"):
+            return None
+
+        summary = CleanupSummary()
+        self.last_cleanup_summary = summary
+        if self.netbox is None or self.zabbix is None:
+            logger.error(
+                "Deleted-source cleanup skipped: API connections are unavailable."
+            )
+            return summary
+        # pynetbox and zabbix-utils expose their endpoint attributes dynamically,
+        # so their library stubs cannot express the chained API calls below.
+        netbox = cast(Any, self.netbox)
+        zabbix = cast(Any, self.zabbix)
+        instance_id = str(self.config.get("cleanup_instance_id", "default"))
+        try:
+            # Deliberately do not use the configured sync filters here: an object
+            # excluded from a normal sync is still a live cleanup source.
+            device_ids = {
+                self._record_id(record) for record in netbox.dcim.devices.filter()
+            }
+            vm_ids = {
+                self._record_id(record)
+                for record in netbox.virtualization.virtual_machines.filter()
+            }
+        except Exception as error:  # Fail closed for any NetBox existence lookup error.
+            logger.error(
+                "Deleted-source cleanup skipped: unable to fetch complete NetBox "
+                "device and VM ID sets: %s",
+                error,
+            )
+            return summary
+
+        try:
+            hosts = zabbix.host.get(
+                output=["hostid", "host", "name", "flags"],
+                selectTags=["tag", "value"],
+                tags=[{"tag": CLEANUP_INSTANCE_TAG, "value": instance_id}],
+                evaltype=0,
+            )
+        except (APIRequestError, ProcessingError) as error:
+            logger.error(
+                "Deleted-source cleanup skipped: unable to query Zabbix ownership "
+                "tags for instance '%s': %s",
+                instance_id,
+                error,
+            )
+            return summary
+
+        source_sets = {"device": device_ids, "device-oob": device_ids, "vm": vm_ids}
+        for host in hosts:
+            label = self._host_label(host)
+            tags = host.get("tags", []) or []
+            instance_values = [
+                str(tag.get("value", ""))
+                for tag in tags
+                if tag.get("tag") == CLEANUP_INSTANCE_TAG
+            ]
+            source_values = [
+                str(tag.get("value", ""))
+                for tag in tags
+                if tag.get("tag") == CLEANUP_SOURCE_TAG
+            ]
+            if len(instance_values) != 1 or instance_values[0] != instance_id:
+                logger.warning(
+                    "Deleted-source cleanup: skipping host %s with ambiguous or foreign "
+                    "ownership namespace tags.",
+                    label,
+                )
+                continue
+            if str(host.get("flags", "0")) == "4":
+                logger.warning(
+                    "Deleted-source cleanup: skipping discovery-owned host %s.", label
+                )
+                continue
+            if len(source_values) != 1:
+                logger.warning(
+                    "Deleted-source cleanup: skipping host %s with ambiguous source markers.",
+                    label,
+                )
+                continue
+            marker_match = fullmatch(
+                r"(device|device-oob|vm):([1-9][0-9]*)", source_values[0]
+            )
+            if not marker_match:
+                logger.warning(
+                    "Deleted-source cleanup: skipping host %s with malformed or foreign "
+                    "source marker '%s'.",
+                    label,
+                    source_values[0],
+                )
+                continue
+            source_type, source_id = marker_match.groups()
+            if int(source_id) in source_sets[source_type]:
+                continue
+            try:
+                zabbix.host.delete(host["hostid"])
+            except (APIRequestError, ProcessingError) as error:
+                logger.error(
+                    "Deleted-source cleanup: unable to delete host %s (ID:%s): %s",
+                    label,
+                    host.get("hostid"),
+                    error,
+                )
+                summary.failures.append(label)
+                continue
+            logger.info(
+                "Deleted-source cleanup: deleted host %s (ID:%s) for missing %s %s.",
+                label,
+                host.get("hostid"),
+                source_type,
+                source_id,
+            )
+            summary.removed.append(label)
+        summary.log(logger)
+        return summary
 
     @staticmethod
     def _template_skip_reason(nb_object, config, *, vm=False):
@@ -261,6 +428,8 @@ class Sync:
             logger,
             config=device_config,
         )
+        device.set_cleanup_source("device-oob" if split_import else "device")
+        linked_before_run = bool(device.zabbix_id)
         logger.debug("Host %s: Started operations on device.", device.name)
         device.set_template(
             device_config["templates_config_context"],
@@ -355,6 +524,10 @@ class Sync:
                 # Add new hostgroups to zabbix group list
                 zabbix_groups.append(group)
         adopted = device.adopt_existing_zabbix_host()
+        cleanup_ownership = bool(
+            device_config.get("cleanup_deleted_hosts")
+            and (linked_before_run or not adopted)
+        )
         full_sync = True
         if adopted and (
             device.adopted_azure_discovered_host
@@ -371,6 +544,7 @@ class Sync:
                 device_config["full_proxy_sync"],
                 device_config["create_hostgroups"],
                 full_sync=full_sync,
+                cleanup_ownership=cleanup_ownership,
             )
             return True
         # Add device to Zabbix
@@ -638,6 +812,8 @@ class Sync:
                     logger,
                     config=self.config,
                 )
+                vm.set_cleanup_source("vm")
+                linked_before_run = bool(vm.zabbix_id)
                 logger.debug("Host %s: Started operations on VM.", vm.name)
                 vm.set_vm_template()
                 # Check if a valid template has been found for this VM.
@@ -705,6 +881,10 @@ class Sync:
                         # Add new hostgroups to zabbix group list
                         zabbix_groups.append(group)
                 adopted = vm.adopt_existing_zabbix_host()
+                cleanup_ownership = bool(
+                    self.config.get("cleanup_deleted_hosts")
+                    and (linked_before_run or not adopted)
+                )
                 full_sync = True
                 if adopted and (
                     vm.adopted_azure_discovered_host
@@ -721,6 +901,7 @@ class Sync:
                         self.config["full_proxy_sync"],
                         self.config["create_hostgroups"],
                         full_sync=full_sync,
+                        cleanup_ownership=cleanup_ownership,
                     )
                     continue
                 # Add VM to Zabbix
@@ -756,5 +937,6 @@ class Sync:
                     )
                 except SyncError as error:
                     self._record_sync_error(summary, summary_label, error)
+        self._cleanup_deleted_hosts()
         summary.log(logger)
         return True
