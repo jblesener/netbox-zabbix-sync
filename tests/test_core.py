@@ -2361,6 +2361,31 @@ class TestAdoptExistingHosts(unittest.TestCase):
             }
         ]
 
+    def _make_lld_zabbix_host(self, hostname, tags=None):
+        """Build a discovered host with both prototype and manual groups."""
+        host = self._make_zabbix_host(hostname=hostname, status="1")[0]
+        host.update(
+            {
+                "host": "50332e03-e109-e2bd-b8ed-c180f04dd1c0",
+                "flags": "4",
+                "hostDiscovery": {"parent_hostid": "300"},
+                "parentTemplates": [
+                    {"templateid": "99", "link_type": "1"},
+                    {"templateid": "2", "link_type": "0"},
+                ],
+                "hostgroups": [
+                    {"groupid": "20", "flags": "0"},
+                    {"groupid": "2", "flags": "0"},
+                ],
+                "groups": [
+                    {"groupid": "20", "flags": "0"},
+                    {"groupid": "2", "flags": "0"},
+                ],
+                "tags": tags or [],
+            }
+        )
+        return host
+
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_adopt_existing_esxi_device_by_name(self, mock_api, mock_zabbix_api):
@@ -2442,7 +2467,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
     def test_adopted_vmware_lld_vm_preserves_discovery_owned_fields(
         self, mock_api, mock_zabbix_api
     ):
-        """VMware LLD hosts retain their UUID and LLD template/group links."""
+        """Default LLD sync preserves every group but still syncs safe fields."""
         platform = MagicMock()
         platform.name = "VMware ESXi"
         vm = MockNetboxVM(
@@ -2450,6 +2475,12 @@ class TestAdoptExistingHosts(unittest.TestCase):
             status_label="Active",
             zabbix_hostid=None,
             platform=platform,
+            config_context={
+                "zabbix": {
+                    "templates": ["TestTemplate"],
+                    "tags": [{"netbox": "managed"}],
+                }
+            },
         )
         self._setup_netbox_mock(mock_api, vms=[vm])
         mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
@@ -2462,46 +2493,15 @@ class TestAdoptExistingHosts(unittest.TestCase):
                 }
             ],
             [],
-            [
-                {
-                    "hostid": "77",
-                    "host": "50332e03-e109-e2bd-b8ed-c180f04dd1c0",
-                    "name": "adprd-admin1",
-                    "flags": "4",
-                    "hostDiscovery": {"parent_hostid": "300"},
-                    "parentTemplates": [
-                        {"templateid": "99", "link_type": "1"},
-                        {"templateid": "2", "link_type": "0"},
-                    ],
-                    "hostgroups": [
-                        {"groupid": "20", "flags": "0"},
-                        {"groupid": "2", "flags": "0"},
-                    ],
-                    "groups": [
-                        {"groupid": "20", "flags": "0"},
-                        {"groupid": "2", "flags": "0"},
-                    ],
-                    "status": "1",
-                    "interfaces": [{}],
-                    "inventory_mode": "-1",
-                    "inventory": {},
-                    "macros": [],
-                    "tags": [],
-                    "proxy_hostid": "0",
-                    "proxyid": "0",
-                    "proxy_groupid": "0",
-                }
-            ],
+            [self._make_lld_zabbix_host("adprd-admin1")],
         ]
-        mock_zabbix.hostprototype.get.return_value = [
-            {"hostid": "300", "groupLinks": [{"groupid": "20"}]}
-        ]
-
         syncer = Sync(
             {
                 "sync_vms": True,
                 "vm_hostgroup_format": "site/role",
                 "adopt_existing_hosts": True,
+                "tag_sync": True,
+                "vm_tag_map": {},
             }
         )
         syncer.connect(
@@ -2526,9 +2526,157 @@ class TestAdoptExistingHosts(unittest.TestCase):
                 ),
                 call(
                     hostid=77,
-                    groups=[{"groupid": "20"}, {"groupid": "1"}],
+                    tags=[{"tag": "netbox", "value": "managed"}],
                 ),
             ],
+        )
+        mock_zabbix.hostprototype.get.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopted_vmware_lld_vm_syncs_groups_when_opted_in(
+        self, mock_api, mock_zabbix_api
+    ):
+        """The opt-in preserves prototype groups while reconciling manual groups."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        vm = MockNetboxVM(
+            name="adprd-admin2",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [{"hostid": "77", "host": "adprd-admin2", "name": "adprd-admin2"}],
+            [],
+            [self._make_lld_zabbix_host("adprd-admin2")],
+        ]
+        mock_zabbix.hostprototype.get.return_value = [
+            {"hostid": "300", "groupLinks": [{"groupid": "20"}]}
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "sync_lld_hostgroups": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
+        self.assertIn(
+            call(hostid=77, groups=[{"groupid": "20"}, {"groupid": "1"}]),
+            mock_zabbix.host.update.call_args_list,
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_linked_lld_vm_skips_missing_netbox_group_and_syncs_tags(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Discovery status, not adoption, protects later LLD syncs by default."""
+        vm = MockNetboxVM(
+            name="adprd-admin3",
+            zabbix_hostid=77,
+            config_context={
+                "zabbix": {
+                    "templates": ["TestTemplate"],
+                    "tags": [{"netbox": "managed"}],
+                }
+            },
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.hostgroup.get.return_value = []
+        mock_zabbix.host.get.return_value = [self._make_lld_zabbix_host("adprd-admin3")]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "create_hostgroups": False,
+                "tag_sync": True,
+                "vm_tag_map": {},
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertIn(
+            call(hostid=77, tags=[{"tag": "netbox", "value": "managed"}]),
+            mock_zabbix.host.update.call_args_list,
+        )
+        self.assertFalse(
+            any(
+                "groups" in call.kwargs
+                for call in mock_zabbix.host.update.call_args_list
+            )
+        )
+        mock_zabbix.hostgroup.create.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopted_non_lld_vm_reconciles_groups_by_default(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Adopted hosts without LLD flags retain normal group reconciliation."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        vm = MockNetboxVM(
+            name="esxi-vm-groups",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        host = self._make_zabbix_host(hostname="esxi-vm-groups")[0]
+        host["hostgroups"] = [{"groupid": "2"}]
+        host["groups"] = [{"groupid": "2"}]
+        mock_zabbix.host.get.side_effect = [
+            [{"hostid": "77", "host": "esxi-vm-groups", "name": "esxi-vm-groups"}],
+            [],
+            [host],
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.update.assert_called_once_with(
+            hostid=77, groups=[{"groupid": "1"}]
         )
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")

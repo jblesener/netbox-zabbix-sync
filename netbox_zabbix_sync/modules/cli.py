@@ -23,6 +23,10 @@ _BOOL_ARGS = [
         "Allow host adoption for virtual machines when adoption is enabled.",
     ),
     (
+        "sync_lld_hostgroups",
+        "Reconcile NetBox hostgroups for hosts created by Zabbix low-level discovery.",
+    ),
+    (
         "full_proxy_sync",
         "Enable full proxy sync (removes proxies not in config context).",
     ),

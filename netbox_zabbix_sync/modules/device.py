@@ -963,14 +963,15 @@ class PhysicalDevice:
         self.logger.info("Host %s: Tags OUT of sync.", self.name)
         self.update_zabbix_host(tags=desired)
 
-    def _sync_discovered_host(self, host):
+    def _sync_discovered_host(self, host, sync_hostgroups=False):
         """Reconcile the NetBox-managed parts of an LLD-created host."""
         self.logger.info(
             "Host %s: Preserving fields managed by Zabbix low-level discovery.",
             self.name,
         )
         self._sync_discovered_templates(host)
-        self._sync_discovered_groups(host)
+        if sync_hostgroups:
+            self._sync_discovered_groups(host)
         self._sync_discovered_macros(host)
         self._sync_discovered_tags(host)
 
@@ -1330,35 +1331,15 @@ class PhysicalDevice:
         create_hostgroups,
         full_sync=True,
         cleanup_ownership=False,
+        hostgroup_resolver=None,
     ):
         """
         Checks if Zabbix object is still valid with NetBox parameters.
         """
         if full_sync:
-            # If group is found or if the hostgroup is nested
-            # or len(self.hostgroups.split("/")) > 1:
-            if not self.set_zbx_groupid(groups):
-                if create_hostgroups:
-                    # Script is allowed to create a new hostgroup
-                    new_groups = self.create_zbx_hostgroup(groups)
-                    for group in new_groups:
-                        # Add all new groups to the list of groups
-                        groups.append(group)
-                # check if the initial group was not already found (and this is a nested folder check)
-                if not self.group_ids:
-                    zbx_groupid_confirmation = self.set_zbx_groupid(groups)
-                    if not zbx_groupid_confirmation and not create_hostgroups:
-                        # Function returns true / false but also sets GroupID
-                        e = (
-                            f"Host {self.name}: different hostgroup is required but "
-                            "unable to create hostgroup without generation permission."
-                        )
-                        self.logger.warning(e)
-                        raise SyncInventoryError(e)
-
-            # Prepare templates and proxy config
+            # LLD hosts still need their desired manual templates prepared, but
+            # their hostgroup work must wait until discovery status is known.
             self.zbx_template_prepper(templates)
-            self._set_proxy(proxies)
         # Get host object from Zabbix
         host = self.zabbix.host.get(
             filter={"hostid": self.zabbix_id},
@@ -1394,10 +1375,45 @@ class PhysicalDevice:
             self.logger.error(e)
             raise SyncInventoryError(e)
         host = host[0]
-        discovered_host = full_sync and self._is_discovered_host(host)
+        discovered_host = self._is_discovered_host(host)
+        sync_lld_hostgroups = bool(self.config.get("sync_lld_hostgroups", False))
+
+        # Resolve, validate, and create NetBox-derived hostgroups only after
+        # checking whether Zabbix created this host through LLD.  This lets
+        # LLD hosts retain all existing groups by default, even when their
+        # configured NetBox group is absent or cannot be generated.
+        if full_sync and (not discovered_host or sync_lld_hostgroups):
+            if hostgroup_resolver and not hostgroup_resolver():
+                e = f"Host {self.name}: has no valid hostgroups."
+                self.logger.warning(e)
+                raise SyncInventoryError(e)
+            if not self.set_zbx_groupid(groups):
+                if create_hostgroups:
+                    new_groups = self.create_zbx_hostgroup(groups)
+                    groups.extend(new_groups)
+                if not self.group_ids:
+                    zbx_groupid_confirmation = self.set_zbx_groupid(groups)
+                    if not zbx_groupid_confirmation and not create_hostgroups:
+                        e = (
+                            f"Host {self.name}: different hostgroup is required but "
+                            "unable to create hostgroup without generation permission."
+                        )
+                        self.logger.warning(e)
+                        raise SyncInventoryError(e)
+
         if discovered_host:
-            self._sync_discovered_host(host)
+            if full_sync:
+                self._sync_discovered_host(host, sync_hostgroups=sync_lld_hostgroups)
+            else:
+                # metadata_only adoption still permits the safe metadata
+                # reconciliation paths, without falling back to destructive
+                # full replacements of automatic LLD entries.
+                self._sync_discovered_macros(host)
+                self._sync_discovered_tags(host)
             full_sync = False
+
+        if full_sync:
+            self._set_proxy(proxies)
 
         if full_sync:
             if host["host"] == self.name:

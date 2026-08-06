@@ -493,12 +493,12 @@ class Sync:
                 self._template_skip_reason(nb_object, self.config, vm=True),
             )
             return
-        vm.set_hostgroup(
-            self.config["vm_hostgroup_format"], netbox_site_groups, netbox_regions
-        )
-        if not vm.hostgroups:
-            summary.record(summary_label, "no usable Zabbix hostgroup")
-            return
+
+        def resolve_hostgroups():
+            return vm.set_hostgroup(
+                self.config["vm_hostgroup_format"], netbox_site_groups, netbox_regions
+            )
+
         if self.config["extended_site_properties"] and nb_object.site:
             logger.debug("Host %s: extending site information.", vm.name)
             nb_object.site.full_details()
@@ -526,9 +526,6 @@ class Sync:
             return
         if vm.status in self.config["zabbix_device_disable"]:
             vm.zabbix_state = 1
-        if self.config["create_hostgroups"]:
-            hostgroups = vm.create_zbx_hostgroup(zabbix_groups)
-            zabbix_groups.extend(hostgroups)
         adopted = vm.adopt_existing_zabbix_host()
         cleanup_ownership = bool(
             self.config.get("cleanup_deleted_hosts")
@@ -551,8 +548,15 @@ class Sync:
                 self.config["create_hostgroups"],
                 full_sync=full_sync,
                 cleanup_ownership=cleanup_ownership,
+                hostgroup_resolver=resolve_hostgroups,
             )
             return
+        if not resolve_hostgroups():
+            summary.record(summary_label, "no usable Zabbix hostgroup")
+            return
+        if self.config["create_hostgroups"]:
+            hostgroups = vm.create_zbx_hostgroup(zabbix_groups)
+            zabbix_groups.extend(hostgroups)
         vm.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
         if not vm.zabbix_id:
             summary.record(
@@ -597,17 +601,12 @@ class Sync:
                 self._template_skip_reason(nb_device, device_config),
             )
             return True
-        device.set_hostgroup(
-            device_config["hostgroup_format"], netbox_site_groups, netbox_regions
-        )
-        # Check if a valid hostgroup has been found for this device.
-        if not device.hostgroups:
-            logger.warning(
-                "Host %s: has no valid hostgroups, Skipping this host...",
-                device.name,
+
+        def resolve_hostgroups():
+            return device.set_hostgroup(
+                device_config["hostgroup_format"], netbox_site_groups, netbox_regions
             )
-            summary.record(summary_label, "no usable Zabbix hostgroup")
-            return True
+
         if device_config["extended_site_properties"] and nb_device.site:
             logger.debug("Host %s: extending site information.", device.name)
             nb_device.site.full_details()
@@ -670,14 +669,6 @@ class Sync:
         # Check if the device is in the disabled state
         if device.status in device_config["zabbix_device_disable"]:
             device.zabbix_state = 1
-        # Add hostgroup is config is set
-        if device_config["create_hostgroups"]:
-            # Create new hostgroup. Potentially multiple groups if nested
-            hostgroups = device.create_zbx_hostgroup(zabbix_groups)
-            # go through all newly created hostgroups
-            for group in hostgroups:
-                # Add new hostgroups to zabbix group list
-                zabbix_groups.append(group)
         adopted = device.adopt_existing_zabbix_host()
         cleanup_ownership = bool(
             device_config.get("cleanup_deleted_hosts")
@@ -700,8 +691,19 @@ class Sync:
                 device_config["create_hostgroups"],
                 full_sync=full_sync,
                 cleanup_ownership=cleanup_ownership,
+                hostgroup_resolver=resolve_hostgroups,
             )
             return True
+        if not resolve_hostgroups():
+            logger.warning(
+                "Host %s: has no valid hostgroups, Skipping this host...",
+                device.name,
+            )
+            summary.record(summary_label, "no usable Zabbix hostgroup")
+            return True
+        if device_config["create_hostgroups"]:
+            hostgroups = device.create_zbx_hostgroup(zabbix_groups)
+            zabbix_groups.extend(hostgroups)
         # Add device to Zabbix
         device.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
         if not device.zabbix_id:

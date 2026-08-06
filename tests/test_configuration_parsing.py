@@ -50,6 +50,7 @@ def test_load_config_defaults():
             "Azure Virtual Machine by HTTP"
         ]
         assert config["azure_vm_resource_id_cf"] == ""
+        assert config["sync_lld_hostgroups"] is False
         assert config["cleanup_deleted_hosts"] is False
         assert config["cleanup_instance_id"] == "default"
 
@@ -205,3 +206,11 @@ def test_cleanup_options_can_be_overridden_on_the_cli():
 
     assert result["cleanup_deleted_hosts"] is True
     assert result["cleanup_instance_id"] == "deployment-a"
+
+
+def test_lld_hostgroup_sync_can_be_overridden_on_the_cli():
+    config = DEFAULT_CONFIG.copy()
+
+    result = _apply_cli_overrides(config, Namespace(sync_lld_hostgroups=True))
+
+    assert result["sync_lld_hostgroups"] is True

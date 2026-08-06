@@ -46,6 +46,11 @@ sync_vms = False
 # Check the README documentation for values to use in the VM hostgroup format.
 vm_hostgroup_format = "cluster_type/cluster/role"
 
+# By default, hosts created by Zabbix low-level discovery retain every existing
+# hostgroup. Set to True to also reconcile manually linked NetBox hostgroups
+# while preserving host-prototype groups.
+sync_lld_hostgroups = False
+
 ## NetApp ONTAP virtualization cluster sync
 # Synchronize virtualization clusters whose type is exactly "NetApp ONTAP".
 # Clusters need the custom fields configured by device_cf (normally

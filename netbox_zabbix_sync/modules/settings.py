@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "adopt_scope": "esxi",
     "adopt_for_vms": True,
     "adopt_enrich_mode": "full",
+    "sync_lld_hostgroups": False,
     "full_proxy_sync": False,
     "zabbix_device_removal": ["Decommissioning", "Inventory"],
     "zabbix_device_disable": ["Offline", "Planned", "Staged", "Failed"],
