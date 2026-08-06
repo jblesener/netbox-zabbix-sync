@@ -1447,7 +1447,11 @@ class PhysicalDevice:
                     templateids.append({"templateid": template["templateid"]})
                 # Update Zabbix with NB templates and clear any old / lost templates
                 self.update_zabbix_host(
-                    templates_clear=host["parentTemplates"], templates=templateids
+                    templates_clear=[
+                        {"templateid": template["templateid"]}
+                        for template in host["parentTemplates"]
+                    ],
+                    templates=templateids,
                 )
             else:
                 self.logger.debug("Host %s: Template(s) in-sync.", self.name)
