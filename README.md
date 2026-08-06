@@ -273,6 +273,7 @@ adopt_scope = "esxi"           # "esxi", "azure", "cloud", or "all"
 adopt_for_vms = True           # include VMs in adoption scope checks
 adopt_enrich_mode = "full"     # "full" or "metadata_only"
 sync_lld_hostgroups = False    # preserve all existing groups on LLD hosts
+lld_usermacro_overrides = ["{$TOTAL_MEMORY}", "{$DEV_ROLE}", "{$NB_URL}", "{$NB_ID}"]
 ```
 
 Behavior:
@@ -287,9 +288,14 @@ Behavior:
   is skipped for safety.
 - LLD-created hosts (including VMware-discovered VMs) retain discovery-owned
   fields: technical and visible names, LLD-linked templates, prototype groups,
-  automatic tags/macros, and scalar host settings. NetBox continues to
-  reconcile manually linked templates, tags, and macros without removing
-  discovery-owned entries. By default it leaves every LLD hostgroup unchanged,
+  automatic tags/macros, and scalar host settings. The macros named by
+  `lld_usermacro_overrides` are the exception: when NetBox defines one, the
+  syncer converts its matching automatic LLD macro to a manually managed macro
+  and synchronizes it from NetBox. The default list is `{$TOTAL_MEMORY}`,
+  `{$DEV_ROLE}`, `{$NB_URL}`, and `{$NB_ID}`; set it to `[]` to preserve all
+  LLD-owned macros. NetBox continues to reconcile manually linked templates,
+  tags, and macros without removing other discovery-owned entries. By default
+  it leaves every LLD hostgroup unchanged,
   including manual groups; set `sync_lld_hostgroups = True` to restore manual
   hostgroup reconciliation while preserving prototype groups.
 - Azure VM hosts linked to `azure_vm_discovered_templates` (default:

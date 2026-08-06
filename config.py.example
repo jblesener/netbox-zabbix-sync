@@ -51,6 +51,11 @@ vm_hostgroup_format = "cluster_type/cluster/role"
 # while preserving host-prototype groups.
 sync_lld_hostgroups = False
 
+# On LLD-created hosts, these automatic macros are converted to manually
+# managed macros and synchronized from NetBox. Set this list to [] to preserve
+# all LLD-owned macros, or add macro names to manage additional collisions.
+lld_usermacro_overrides = ["{$TOTAL_MEMORY}", "{$DEV_ROLE}", "{$NB_URL}", "{$NB_ID}"]
+
 ## NetApp ONTAP virtualization cluster sync
 # Synchronize virtualization clusters whose type is exactly "NetApp ONTAP".
 # Clusters need the custom fields configured by device_cf (normally

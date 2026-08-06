@@ -2494,6 +2494,143 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_lld_vm_converts_default_allowlisted_macro(self, mock_api, mock_zabbix_api):
+        """Default LLD macro overrides become NetBox-managed macros."""
+        vm = MockNetboxVM(
+            name="lld-macro-override",
+            zabbix_hostid=77,
+            config_context={
+                "zabbix": {
+                    "templates": ["TestTemplate"],
+                    "usermacros": {"{$TOTAL_MEMORY}": "4096"},
+                }
+            },
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        host = self._make_lld_zabbix_host("lld-macro-override")
+        host["macros"] = [
+            {
+                "hostmacroid": "400",
+                "macro": "{$TOTAL_MEMORY}",
+                "value": "2048",
+                "type": "0",
+                "description": "LLD value",
+                "automatic": "1",
+            },
+            {
+                "hostmacroid": "401",
+                "macro": "{$LLD_ONLY}",
+                "value": "discovered",
+                "type": "0",
+                "description": "",
+                "automatic": "1",
+            },
+        ]
+        mock_zabbix.host.get.return_value = [host]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "usermacro_sync": "partial",
+                "vm_usermacro_map": {},
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertIn(
+            call(
+                hostid=77,
+                macros=[
+                    {
+                        "hostmacroid": "401",
+                        "macro": "{$LLD_ONLY}",
+                        "value": "discovered",
+                        "type": "0",
+                        "description": "",
+                        "automatic": "1",
+                    },
+                    {
+                        "macro": "{$TOTAL_MEMORY}",
+                        "value": "4096",
+                        "type": "0",
+                        "description": "",
+                        "hostmacroid": "400",
+                        "automatic": "0",
+                    },
+                ],
+            ),
+            mock_zabbix.host.update.call_args_list,
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_lld_vm_preserves_macro_removed_from_allowlist(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Customizing the allowlist to empty preserves every LLD macro."""
+        vm = MockNetboxVM(
+            name="lld-macro-preserve",
+            zabbix_hostid=77,
+            config_context={
+                "zabbix": {
+                    "templates": ["TestTemplate"],
+                    "usermacros": {"{$TOTAL_MEMORY}": "4096"},
+                }
+            },
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        host = self._make_lld_zabbix_host("lld-macro-preserve")
+        host["macros"] = [
+            {
+                "hostmacroid": "400",
+                "macro": "{$TOTAL_MEMORY}",
+                "value": "2048",
+                "type": "0",
+                "description": "LLD value",
+                "automatic": "1",
+            }
+        ]
+        mock_zabbix.host.get.return_value = [host]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "usermacro_sync": "partial",
+                "vm_usermacro_map": {},
+                "lld_usermacro_overrides": [],
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertFalse(
+            any(
+                "macros" in update.kwargs
+                for update in mock_zabbix.host.update.call_args_list
+            )
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_adopted_vmware_lld_vm_preserves_discovery_owned_fields(
         self, mock_api, mock_zabbix_api
     ):

@@ -51,6 +51,12 @@ def test_load_config_defaults():
         ]
         assert config["azure_vm_resource_id_cf"] == ""
         assert config["sync_lld_hostgroups"] is False
+        assert config["lld_usermacro_overrides"] == [
+            "{$TOTAL_MEMORY}",
+            "{$DEV_ROLE}",
+            "{$NB_URL}",
+            "{$NB_ID}",
+        ]
         assert config["cleanup_deleted_hosts"] is False
         assert config["cleanup_instance_id"] == "default"
 

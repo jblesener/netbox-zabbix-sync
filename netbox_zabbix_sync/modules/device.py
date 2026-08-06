@@ -882,24 +882,50 @@ class PhysicalDevice:
         self.update_zabbix_host(groups=desired)
 
     def _sync_discovered_macros(self, host):
-        """Sync manual macros without deleting macros created by LLD."""
+        """Sync manual macros without deleting protected LLD-created macros."""
         if not self.config["usermacro_sync"]:
             return
 
         automatic = [
             macro for macro in host["macros"] if str(macro.get("automatic", "0")) == "1"
         ]
-        automatic_names = {macro["macro"] for macro in automatic}
-        netbox_macros = [
-            macro for macro in self.usermacros if macro["macro"] not in automatic_names
-        ]
+        automatic_by_name = {macro["macro"]: macro for macro in automatic}
+        configured_overrides = self.config.get("lld_usermacro_overrides", [])
+        if isinstance(configured_overrides, str):
+            configured_overrides = [configured_overrides]
+        override_names = {str(macro) for macro in configured_overrides}
+
+        converted_names = set()
+        netbox_macros = []
         for macro in self.usermacros:
-            if macro["macro"] in automatic_names:
+            automatic_macro = automatic_by_name.get(macro["macro"])
+            if automatic_macro:
+                if macro["macro"] in override_names:
+                    hostmacroid = automatic_macro.get("hostmacroid")
+                    if hostmacroid:
+                        converted = deepcopy(macro)
+                        converted["hostmacroid"] = hostmacroid
+                        converted["automatic"] = "0"
+                        netbox_macros.append(converted)
+                        converted_names.add(macro["macro"])
+                        continue
+                    self.logger.warning(
+                        "Host %s: Unable to convert LLD macro %s to NetBox-managed "
+                        "because Zabbix did not return its hostmacroid.",
+                        self.name,
+                        macro["macro"],
+                    )
                 self.logger.warning(
                     "Host %s: Preserving LLD macro %s instead of replacing it from NetBox.",
                     self.name,
                     macro["macro"],
                 )
+                continue
+            netbox_macros.append(macro)
+
+        automatic = [
+            macro for macro in automatic if macro["macro"] not in converted_names
+        ]
 
         sync_mode = str(self.config["usermacro_sync"]).lower()
         if sync_mode == "partial":
@@ -934,6 +960,12 @@ class PhysicalDevice:
             return
 
         self.logger.info("Host %s: Usermacros OUT of sync.", self.name)
+        for macro_name in sorted(converted_names):
+            self.logger.info(
+                "Host %s: Converting LLD macro %s to NetBox-managed.",
+                self.name,
+                macro_name,
+            )
         self.update_zabbix_host(macros=update_macros)
 
     def _sync_discovered_tags(self, host):

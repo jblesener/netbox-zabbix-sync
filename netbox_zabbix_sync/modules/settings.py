@@ -45,6 +45,12 @@ DEFAULT_CONFIG = {
     "adopt_for_vms": True,
     "adopt_enrich_mode": "full",
     "sync_lld_hostgroups": False,
+    "lld_usermacro_overrides": [
+        "{$TOTAL_MEMORY}",
+        "{$DEV_ROLE}",
+        "{$NB_URL}",
+        "{$NB_ID}",
+    ],
     "full_proxy_sync": False,
     "zabbix_device_removal": ["Decommissioning", "Inventory"],
     "zabbix_device_disable": ["Offline", "Planned", "Staged", "Failed"],
