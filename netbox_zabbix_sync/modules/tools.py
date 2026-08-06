@@ -86,7 +86,17 @@ def field_mapper(host, mapper, nbdevice, logger):
         value = nbdevice
         # ... and step through the dict till we find the needed value
         for item in field_list:
-            value = value[item] if value else None
+            if not value:
+                value = None
+                break
+            try:
+                value = value[item]
+            except (AttributeError, IndexError, KeyError, TypeError):
+                # NetBox records may omit optional fields.  A mapping to one
+                # of those fields should behave like any other empty value,
+                # rather than aborting the whole sync.
+                value = None
+                break
         # Check if the result is usable and expected
         # We want to apply any int or float 0 values,
         # even if python thinks those are empty.

@@ -2608,7 +2608,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
                 "vm_hostgroup_format": "site/role",
                 "create_hostgroups": False,
                 "tag_sync": True,
-                "vm_tag_map": {},
+                "vm_tag_map": {"group/name": "group"},
             }
         )
         syncer.connect(
