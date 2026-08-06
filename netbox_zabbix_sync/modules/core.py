@@ -17,6 +17,7 @@ from netbox_zabbix_sync.modules.azure_subscription import AzureSubscription
 from netbox_zabbix_sync.modules.device import (
     CLEANUP_INSTANCE_TAG,
     CLEANUP_SOURCE_TAG,
+    NetboxClusterImport,
     NetboxDeviceImport,
     PhysicalDevice,
 )
@@ -248,7 +249,25 @@ class Sync:
             )
             return summary
 
-        source_sets = {"device": device_ids, "device-oob": device_ids, "vm": vm_ids}
+        try:
+            ontap_cluster_ids = {
+                self._record_id(record)
+                for record in netbox.virtualization.clusters.filter()
+            }
+        except Exception as error:
+            logger.error(
+                "Deleted-source cleanup skipped: unable to fetch the complete NetBox "
+                "virtualization cluster ID set: %s",
+                error,
+            )
+            return summary
+
+        source_sets = {
+            "device": device_ids,
+            "device-oob": device_ids,
+            "vm": vm_ids,
+            "ontap-cluster": ontap_cluster_ids,
+        }
         for host in hosts:
             label = self._host_label(host)
             tags = host.get("tags", []) or []
@@ -281,7 +300,8 @@ class Sync:
                 )
                 continue
             marker_match = fullmatch(
-                r"(device|device-oob|vm):([1-9][0-9]*)", source_values[0]
+                r"(device|device-oob|vm|ontap-cluster):([1-9][0-9]*)",
+                source_values[0],
             )
             if not marker_match:
                 logger.warning(
@@ -403,6 +423,141 @@ class Sync:
             )
         )
         return imports
+
+    @staticmethod
+    def _is_ontap_cluster(nb_cluster):
+        """Return whether a virtualization cluster is a NetApp ONTAP cluster."""
+        cluster_type = getattr(nb_cluster, "type", None)
+        return str(getattr(cluster_type, "name", "")).casefold() == "netapp ontap"
+
+    def _infer_cluster_site(self, nb_cluster):
+        """Infer a cluster site when all attached devices share one site."""
+        devices = list(
+            self.netbox.dcim.devices.filter(cluster_id=self._record_id(nb_cluster))
+        )
+        sites = [getattr(device, "site", None) for device in devices]
+        sites = [site for site in sites if site]
+        if not sites:
+            logger.warning(
+                "ONTAP cluster %s has no attached devices with a site.", nb_cluster.name
+            )
+            return None
+
+        def site_key(site):
+            for attribute in ("id", "slug", "name"):
+                value = getattr(site, attribute, None)
+                if value:
+                    return str(value)
+            return str(site)
+
+        unique_sites = {site_key(site): site for site in sites}
+        if len(unique_sites) != 1:
+            logger.warning(
+                "ONTAP cluster %s has attached devices in multiple sites; "
+                "cannot infer a single site.",
+                nb_cluster.name,
+            )
+            return None
+        return next(iter(unique_sites.values()))
+
+    def _process_vm_like(
+        self,
+        nb_object,
+        source_type,
+        netbox_journals,
+        netbox_site_groups,
+        netbox_regions,
+        zabbix_groups,
+        zabbix_templates,
+        zabbix_proxy_list,
+        summary,
+        summary_label,
+    ):
+        """Sync a VM-shaped NetBox object, including an adapted ONTAP cluster."""
+        vm = VirtualMachine(
+            nb_object,
+            self.zabbix,
+            netbox_journals,
+            self.nb_version,
+            self.config["create_journal"],
+            logger,
+            config=self.config,
+        )
+        vm.set_cleanup_source(source_type)
+        linked_before_run = bool(vm.zabbix_id)
+        logger.debug("Host %s: Started operations on %s.", vm.name, source_type)
+        vm.set_vm_template()
+        if not vm.zbx_template_names:
+            summary.record(
+                summary_label,
+                self._template_skip_reason(nb_object, self.config, vm=True),
+            )
+            return
+        vm.set_hostgroup(
+            self.config["vm_hostgroup_format"], netbox_site_groups, netbox_regions
+        )
+        if not vm.hostgroups:
+            summary.record(summary_label, "no usable Zabbix hostgroup")
+            return
+        if self.config["extended_site_properties"] and nb_object.site:
+            logger.debug("Host %s: extending site information.", vm.name)
+            nb_object.site.full_details()
+        vm.set_inventory(nb_object)
+        vm.set_usermacros()
+        vm.set_tags()
+        vm.set_tls()
+        logger.debug("Host %s NetBox data: %s", vm.name, pformat(dict(nb_object)))
+        if vm.status in self.config["zabbix_device_removal"]:
+            if vm.zabbix_id:
+                vm.cleanup()
+                logger.info("Host %s: cleanup complete", vm.name)
+                summary.record(
+                    summary_label,
+                    f"removed due to NetBox status {vm.status}",
+                    intentional=True,
+                )
+                return
+            logger.info("Host %s: Skipping since this host is not active.", vm.name)
+            summary.record(
+                summary_label,
+                f"excluded due to NetBox status {vm.status}",
+                intentional=True,
+            )
+            return
+        if vm.status in self.config["zabbix_device_disable"]:
+            vm.zabbix_state = 1
+        if self.config["create_hostgroups"]:
+            hostgroups = vm.create_zbx_hostgroup(zabbix_groups)
+            zabbix_groups.extend(hostgroups)
+        adopted = vm.adopt_existing_zabbix_host()
+        cleanup_ownership = bool(
+            self.config.get("cleanup_deleted_hosts")
+            and (linked_before_run or not adopted)
+        )
+        full_sync = not (
+            adopted
+            and (
+                vm.adopted_azure_discovered_host
+                or str(self.config.get("adopt_enrich_mode", "full")).lower()
+                == "metadata_only"
+            )
+        )
+        if vm.zabbix_id:
+            vm.consistency_check(
+                zabbix_groups,
+                zabbix_templates,
+                zabbix_proxy_list,
+                self.config["full_proxy_sync"],
+                self.config["create_hostgroups"],
+                full_sync=full_sync,
+                cleanup_ownership=cleanup_ownership,
+            )
+            return
+        vm.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
+        if not vm.zabbix_id:
+            summary.record(
+                summary_label, "Zabbix host already exists without NetBox linkage"
+            )
 
     def _process_device(
         self,
@@ -761,6 +916,13 @@ class Sync:
             netbox_vms = list(
                 self.netbox.virtualization.virtual_machines.filter(**vm_filter_combined)
             )
+        netbox_ontap_clusters = []
+        if self.config["sync_ontap_clusters"]:
+            netbox_ontap_clusters = list(
+                self.netbox.virtualization.clusters.filter(
+                    **self.config["nb_ontap_cluster_filter"]
+                )
+            )
         netbox_azure_subscriptions = []
         if self.config["sync_azure_subscriptions"]:
             netbox_azure_subscriptions = list(
@@ -799,118 +961,47 @@ class Sync:
                     zabbix_templates,
                 )
 
-        # Go through all NetBox devices
+        # Go through all NetBox VMs.
         for nb_vm in netbox_vms:
             summary_label = self._summary_label("VM", nb_vm.name)
             try:
-                vm = VirtualMachine(
+                self._process_vm_like(
                     nb_vm,
-                    self.zabbix,
+                    "vm",
                     netbox_journals,
-                    self.nb_version,
-                    self.config["create_journal"],
-                    logger,
-                    config=self.config,
-                )
-                vm.set_cleanup_source("vm")
-                linked_before_run = bool(vm.zabbix_id)
-                logger.debug("Host %s: Started operations on VM.", vm.name)
-                vm.set_vm_template()
-                # Check if a valid template has been found for this VM.
-                if not vm.zbx_template_names:
-                    summary.record(
-                        summary_label,
-                        self._template_skip_reason(nb_vm, self.config, vm=True),
-                    )
-                    continue
-                vm.set_hostgroup(
-                    self.config["vm_hostgroup_format"],
                     netbox_site_groups,
                     netbox_regions,
+                    zabbix_groups,
+                    zabbix_templates,
+                    zabbix_proxy_list,
+                    summary,
+                    summary_label,
                 )
-                # Check if a valid hostgroup has been found for this VM.
-                if not vm.hostgroups:
-                    summary.record(summary_label, "no usable Zabbix hostgroup")
-                    continue
-                if self.config["extended_site_properties"] and nb_vm.site:
-                    logger.debug("Host %s: extending site information.", vm.name)
-                    nb_vm.site.full_details()
-                vm.set_inventory(nb_vm)
-                vm.set_usermacros()
-                vm.set_tags()
-                vm.set_tls()
-                logger.debug(
-                    "Host %s NetBox data: %s",
-                    vm.name,
-                    pformat(dict(nb_vm)),
+            except SyncError as error:
+                self._record_sync_error(summary, summary_label, error)
+
+        for nb_cluster in netbox_ontap_clusters:
+            if not self._is_ontap_cluster(nb_cluster):
+                continue
+            summary_label = self._summary_label("ONTAP cluster", nb_cluster.name)
+            try:
+                cluster_import = NetboxClusterImport(
+                    nb_cluster,
+                    self._infer_cluster_site(nb_cluster),
+                    self.config["ontap_cluster_primary_ip_cf"],
                 )
-                # Checks if device is in cleanup state
-                if vm.status in self.config["zabbix_device_removal"]:
-                    if vm.zabbix_id:
-                        # Delete device from Zabbix
-                        # and remove hostID from self.netbox.
-                        vm.cleanup()
-                        logger.info("Host %s: cleanup complete", vm.name)
-                        summary.record(
-                            summary_label,
-                            f"removed due to NetBox status {vm.status}",
-                            intentional=True,
-                        )
-                        continue
-                    # Device has been added to NetBox
-                    # but is not in Activate state
-                    logger.info(
-                        "Host %s: Skipping since this host is not in the active state.",
-                        vm.name,
-                    )
-                    summary.record(
-                        summary_label,
-                        f"excluded due to NetBox status {vm.status}",
-                        intentional=True,
-                    )
-                    continue
-                # Check if the VM is in the disabled state
-                if vm.status in self.config["zabbix_device_disable"]:
-                    vm.zabbix_state = 1
-                # Add hostgroup if config is set
-                if self.config["create_hostgroups"]:
-                    # Create new hostgroup. Potentially multiple groups if nested
-                    hostgroups = vm.create_zbx_hostgroup(zabbix_groups)
-                    # go through all newly created hostgroups
-                    for group in hostgroups:
-                        # Add new hostgroups to zabbix group list
-                        zabbix_groups.append(group)
-                adopted = vm.adopt_existing_zabbix_host()
-                cleanup_ownership = bool(
-                    self.config.get("cleanup_deleted_hosts")
-                    and (linked_before_run or not adopted)
+                self._process_vm_like(
+                    cluster_import,
+                    "ontap-cluster",
+                    netbox_journals,
+                    netbox_site_groups,
+                    netbox_regions,
+                    zabbix_groups,
+                    zabbix_templates,
+                    zabbix_proxy_list,
+                    summary,
+                    summary_label,
                 )
-                full_sync = True
-                if adopted and (
-                    vm.adopted_azure_discovered_host
-                    or str(self.config.get("adopt_enrich_mode", "full")).lower()
-                    == "metadata_only"
-                ):
-                    full_sync = False
-                # Check if VM is already in Zabbix
-                if vm.zabbix_id:
-                    vm.consistency_check(
-                        zabbix_groups,
-                        zabbix_templates,
-                        zabbix_proxy_list,
-                        self.config["full_proxy_sync"],
-                        self.config["create_hostgroups"],
-                        full_sync=full_sync,
-                        cleanup_ownership=cleanup_ownership,
-                    )
-                    continue
-                # Add VM to Zabbix
-                vm.create_in_zabbix(zabbix_groups, zabbix_templates, zabbix_proxy_list)
-                if not vm.zabbix_id:
-                    summary.record(
-                        summary_label,
-                        "Zabbix host already exists without NetBox linkage",
-                    )
             except SyncError as error:
                 self._record_sync_error(summary, summary_label, error)
 

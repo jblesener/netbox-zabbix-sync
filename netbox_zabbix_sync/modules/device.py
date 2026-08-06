@@ -2,10 +2,12 @@
 Device specific handeling for NetBox to Zabbix
 """
 
+from collections.abc import Mapping
 from copy import deepcopy
 from logging import getLogger
 from operator import itemgetter
 from re import fullmatch
+from types import SimpleNamespace
 from typing import Any
 
 from pynetbox import RequestError as NetboxRequestError
@@ -60,6 +62,57 @@ class NetboxDeviceImport:
     def __iter__(self):
         data = dict(self.nb)
         data["name"] = self.name
+        data["primary_ip"] = self.primary_ip
+        data["config_context"] = self.config_context
+        yield from data.items()
+
+
+class NetboxClusterImport:
+    """Adapt a NetBox virtualization cluster for the VM sync workflow.
+
+    NetBox clusters do not have a native primary IP or site.  ONTAP clusters
+    store their management address in a custom field and inherit their site
+    from their member devices, so expose those values in the shape expected by
+    :class:`PhysicalDevice` and :class:`VirtualMachine`.
+    """
+
+    def __init__(self, nb, site, primary_ip_cf):
+        self.nb = nb
+        self.site = site
+        self.primary_ip = self._primary_ip(
+            getattr(nb, "custom_fields", {}).get(primary_ip_cf)
+        )
+        self.config_context = getattr(nb, "config_context", {}) or {}
+        # Clusters have no role.  Supplying None keeps VM hostgroup formats
+        # containing role usable while omitting that empty segment.
+        self.role = getattr(nb, "role", None)
+        self.platform = getattr(nb, "platform", None)
+        self.cluster = None
+        self.virtual_chassis = None
+        self.owner = getattr(nb, "owner", None)
+
+    @staticmethod
+    def _primary_ip(value):
+        """Normalize an IP-address custom-field value to a NetBox IP object."""
+        if not value:
+            return None
+        if hasattr(value, "address"):
+            return value
+        if isinstance(value, Mapping):
+            value = value.get("address") or value.get("display") or value.get("value")
+        if not value:
+            return None
+        return SimpleNamespace(address=str(value))
+
+    def __getattr__(self, name):
+        return getattr(self.nb, name)
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def __iter__(self):
+        data = dict(self.nb)
+        data["site"] = self.site
         data["primary_ip"] = self.primary_ip
         data["config_context"] = self.config_context
         yield from data.items()
@@ -132,7 +185,7 @@ class PhysicalDevice:
 
     def set_cleanup_source(self, source_type):
         """Associate this import with the source marker used by opt-in cleanup."""
-        if source_type not in {"device", "device-oob", "vm"}:
+        if source_type not in {"device", "device-oob", "vm", "ontap-cluster"}:
             raise ValueError(f"Unsupported cleanup source type: {source_type}")
         self.cleanup_source_marker = f"{source_type}:{self.id}"
 

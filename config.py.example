@@ -46,6 +46,16 @@ sync_vms = False
 # Check the README documentation for values to use in the VM hostgroup format.
 vm_hostgroup_format = "cluster_type/cluster/role"
 
+## NetApp ONTAP virtualization cluster sync
+# Synchronize virtualization clusters whose type is exactly "NetApp ONTAP".
+# Clusters need the custom fields configured by device_cf (normally
+# zabbix_hostid) and ontap_cluster_primary_ip_cf. The latter contains the
+# cluster management IP address. The site is inferred when all devices attached
+# to the cluster belong to the same site.
+sync_ontap_clusters = False
+nb_ontap_cluster_filter = {"name__n": "null"}
+ontap_cluster_primary_ip_cf = "primary_ip"
+
 ## Azure subscription sync
 # Set sync_azure_subscriptions to True to sync NetBox Tenants tagged
 # with azure_tag as Zabbix hosts using the Azure by HTTP template.

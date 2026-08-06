@@ -284,6 +284,43 @@ class MockNetboxVM(MockRecord):
         """Mock save method."""
 
 
+class MockNetboxCluster(MockRecord):
+    """Mock a virtualization cluster used for NetApp ONTAP sync tests."""
+
+    def __init__(
+        self,
+        cluster_id=1,
+        name="test-ontap-cluster",
+        cluster_type="NetApp ONTAP",
+        primary_ip="192.168.1.10/24",
+        zabbix_hostid=None,
+        config_context=None,
+    ):
+        super().__init__(values={}, api=None, endpoint=None)
+        self.id = cluster_id
+        self.name = name
+        self.type = MagicMock()
+        self.type.name = cluster_type
+        self.status = MagicMock()
+        self.status.label = "Active"
+        self.status.value = "active"
+        self.custom_fields = {
+            "primary_ip": primary_ip,
+            "zabbix_hostid": zabbix_hostid,
+        }
+        self.config_context = config_context or {
+            "zabbix": {"templates": ["TestTemplate"]}
+        }
+        self.tenant = None
+        self.platform = None
+        self.role = None
+        self.comments = ""
+        self.tags = []
+
+    def save(self):
+        """Mock save method."""
+
+
 class MockNetboxTenant(MockRecord):
     """Mock NetBox Tenant object."""
 
@@ -2846,6 +2883,59 @@ class TestAdoptExistingHosts(unittest.TestCase):
         syncer.start()
 
         mock_zabbix.host.update.assert_called_once_with(hostid=77, status="0")
+
+
+class TestOntapClusterSync(unittest.TestCase):
+    """Validate the adapted virtualization-cluster sync path."""
+
+    def _syncer(self, cluster, attached_devices):
+        netbox = MagicMock()
+        netbox.extras.custom_fields.filter.return_value = []
+        netbox.virtualization.virtual_machines.filter.return_value = []
+        netbox.virtualization.clusters.filter.return_value = [cluster]
+        netbox.dcim.devices.filter.side_effect = lambda **kwargs: (
+            attached_devices if kwargs == {"cluster_id": cluster.id} else []
+        )
+        netbox.dcim.site_groups.all.return_value = []
+        netbox.dcim.regions.all.return_value = []
+        netbox.extras.journal_entries = MagicMock()
+
+        zabbix = MagicMock()
+        zabbix.version = 7.0
+        zabbix.hostgroup.get.return_value = [{"groupid": "1", "name": "TestSite"}]
+        zabbix.template.get.return_value = [{"templateid": "1", "name": "TestTemplate"}]
+        zabbix.proxy.get.return_value = []
+        zabbix.proxygroup.get.return_value = []
+        zabbix.host.get.return_value = []
+        zabbix.host.create.return_value = {"hostids": ["42"]}
+
+        syncer = Sync({"sync_ontap_clusters": True, "vm_hostgroup_format": "site"})
+        syncer.netbox = netbox
+        syncer.zabbix = zabbix
+        syncer.nb_version = "4.5"
+        return syncer, zabbix
+
+    def test_syncs_ontap_cluster_using_custom_field_ip_and_member_site(self):
+        cluster = MockNetboxCluster(name="ontap-prod", primary_ip="192.0.2.10/24")
+        attached_device = MockNetboxDevice(name="ontap-node-1")
+        syncer, zabbix = self._syncer(cluster, [attached_device])
+
+        syncer.start()
+
+        zabbix.host.create.assert_called_once()
+        create_kwargs = zabbix.host.create.call_args.kwargs
+        self.assertEqual(create_kwargs["host"], "ontap-prod")
+        self.assertEqual(create_kwargs["interfaces"][0]["ip"], "192.0.2.10")
+        self.assertEqual(create_kwargs["groups"], [{"groupid": "1"}])
+        syncer.netbox.dcim.devices.filter.assert_any_call(cluster_id=cluster.id)
+
+    def test_skips_non_ontap_cluster_types(self):
+        cluster = MockNetboxCluster(cluster_type="VMware vSphere")
+        syncer, zabbix = self._syncer(cluster, [])
+
+        syncer.start()
+
+        zabbix.host.create.assert_not_called()
 
 
 class TestUnsyncedObjectSummary(unittest.TestCase):

@@ -167,6 +167,21 @@ Note that not all filtering capabilities and properties of devices are
 applicable to VM's and vice-versa. Check the NetBox API documentation to see
 which filtering options are available for each object type.
 
+### NetApp ONTAP virtualization clusters
+
+Set `sync_ontap_clusters` to `True` to sync NetBox virtualization clusters
+whose type is exactly `NetApp ONTAP`. The cluster must have the custom field
+configured by `device_cf` (normally `zabbix_hostid`) and an IP-address custom
+field named `primary_ip`; use `ontap_cluster_primary_ip_cf` to choose a
+different field name. Templates are read from the cluster's `zabbix` config
+context and hostgroups use `vm_hostgroup_format`.
+
+Clusters do not have a site of their own. The syncer infers it when every
+device attached to the cluster belongs to the same site. If no attached device
+has a site, or the devices span multiple sites, the cluster is synced without
+an inferred site and a warning is logged. Use `nb_ontap_cluster_filter` to
+limit the clusters considered.
+
 ## Unsynced object summary
 
 At the end of every run, the syncer writes a warning-level summary of selected
