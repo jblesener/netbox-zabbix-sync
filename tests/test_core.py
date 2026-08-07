@@ -1885,6 +1885,36 @@ class TestVMStatusHandling(unittest.TestCase):
         self.assertEqual(create_kwargs["host"], "test-vm")
         self.assertEqual(create_kwargs["status"], 0)
 
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_ipless_vm_is_created_without_interfaces(self, mock_api, mock_zabbix_api):
+        """An IP-less VM can be created for interface-free checks such as HTTP."""
+        vm = MockNetboxVM(
+            name="http-app",
+            zabbix_hostid=None,
+            config_context={
+                "zabbix": {"templates": ["TestTemplate"], "interface_type": 2}
+            },
+        )
+        vm.primary_ip = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync(self._SYNC_CFG)
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        create_kwargs = mock_zabbix.host.create.call_args.kwargs
+        self.assertEqual(create_kwargs["interfaces"], [])
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+
     # ------------------------------------------------------------------
     # Scenario 2: Active VM, already in Zabbix → consistency check, no update
     # ------------------------------------------------------------------
@@ -1910,6 +1940,58 @@ class TestVMStatusHandling(unittest.TestCase):
 
         mock_zabbix.host.create.assert_not_called()
         mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_ipless_vm_without_interfaces_is_consistent(
+        self, mock_api, mock_zabbix_api
+    ):
+        """An existing IP-less VM remains in sync when it has no interfaces."""
+        vm = MockNetboxVM(name="http-app", zabbix_hostid=42)
+        vm.primary_ip = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        host = self._make_zabbix_host(hostname="http-app")
+        host[0]["interfaces"] = []
+        mock_zabbix.host.get.return_value = host
+
+        syncer = Sync(self._SYNC_CFG)
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_ipless_vm_removes_existing_interfaces(self, mock_api, mock_zabbix_api):
+        """An IP-less VM removes interfaces left from a former primary IP."""
+        vm = MockNetboxVM(name="http-app", zabbix_hostid=42)
+        vm.primary_ip = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        host = self._make_zabbix_host(hostname="http-app")
+        host[0]["interfaces"] = [{"interfaceid": "1", "ip": "192.168.1.1"}]
+        mock_zabbix.host.get.return_value = host
+
+        syncer = Sync(self._SYNC_CFG)
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.update.assert_called_once_with(hostid=42, interfaces=[])
 
     # ------------------------------------------------------------------
     # Scenario 3: Staged VM, not yet in Zabbix → created disabled (status=1)

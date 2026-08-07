@@ -167,6 +167,11 @@ Note that not all filtering capabilities and properties of devices are
 applicable to VM's and vice-versa. Check the NetBox API documentation to see
 which filtering options are available for each object type.
 
+A VM does not need a primary IP address. VMs without one are synced as Zabbix
+hosts with no interfaces, which is suitable for HTTP checks and other
+monitoring configured through templates and usermacros. If an already-synced
+VM loses its primary IP, the sync removes its Zabbix interfaces.
+
 ### NetApp ONTAP virtualization clusters
 
 Set `sync_ontap_clusters` to `True` to sync NetBox virtualization clusters

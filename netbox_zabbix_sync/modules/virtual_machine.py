@@ -40,11 +40,17 @@ class VirtualMachine(PhysicalDevice):
             self.logger.warning(e)
         return True
 
+    def _requires_primary_ip(self):
+        """VMs used for interface-free checks do not need a primary IP."""
+        return False
+
     def set_interface_details(self):
         """
         Overwrites device function to select an agent interface type by default
         Agent type interfaces are more likely to be used with VMs then SNMP
         """
+        if not self.ip:
+            return []
         zabbix_snmp_interface_type = 2
         try:
             # Initiate interface class

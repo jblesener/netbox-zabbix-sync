@@ -246,14 +246,18 @@ class PhysicalDevice:
         """
         Sets basic information like IP address.
         """
-        # Return error if device does not have primary IP.
+        # A primary IP is required for physical devices. VM subclasses may
+        # explicitly opt out when their monitoring does not use an interface.
         if self.nb.primary_ip:
             self.cidr = self.nb.primary_ip.address
             self.ip = self.cidr.split("/")[0]
-        else:
+        elif self._requires_primary_ip():
             e = f"Host {self.name}: no primary IP."
             self.logger.warning(e)
             raise SyncInventoryError(e)
+        else:
+            self.cidr = None
+            self.ip = None
 
         # Check if device has custom field for ZBX ID
         if self.device_cf in self.nb.custom_fields:
@@ -276,6 +280,10 @@ class PhysicalDevice:
                 self.name,
                 self.visible_name,
             )
+
+    def _requires_primary_ip(self):
+        """Return whether this import type needs an interface address."""
+        return True
 
     @staticmethod
     def _hostname_supported_by_zabbix(hostname: str) -> bool:
@@ -1659,11 +1667,21 @@ class PhysicalDevice:
             self._sync_cleanup_ownership(host)
 
         if full_sync:
+            desired_interfaces = self.set_interface_details()
+            if not desired_interfaces:
+                if host["interfaces"]:
+                    self.logger.info("Host %s: Interfaces OUT of sync.", self.name)
+                    self.update_zabbix_host(interfaces=[])
+                else:
+                    self.logger.debug(
+                        "Host %s: Interface-free configuration in-sync.", self.name
+                    )
+                return
             # If only 1 interface has been found
             if len(host["interfaces"]) == 1:
                 updates = {}
                 # Go through each key / item and check if it matches Zabbix
-                for key, item in self.set_interface_details()[0].items():
+                for key, item in desired_interfaces[0].items():
                     # Check if NetBox value is found in Zabbix
                     if key in host["interfaces"][0]:
                         # If SNMP is used, go through nested dict
