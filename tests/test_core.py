@@ -2565,7 +2565,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
                         "type": "0",
                         "description": "",
                         "hostmacroid": "400",
-                        "automatic": "0",
+                        "automatic": 0,
                     },
                 ],
             ),

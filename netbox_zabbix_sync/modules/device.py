@@ -905,7 +905,7 @@ class PhysicalDevice:
                     if hostmacroid:
                         converted = deepcopy(macro)
                         converted["hostmacroid"] = hostmacroid
-                        converted["automatic"] = "0"
+                        converted["automatic"] = 0
                         netbox_macros.append(converted)
                         converted_names.add(macro["macro"])
                         continue
