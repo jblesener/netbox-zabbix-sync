@@ -86,6 +86,25 @@ used for modifying filters and setting variables such as custom field names.
 cp config.py.example config.py
 ```
 
+### Override configuration with `NBZX_` environment variables
+
+Any scalar option from `config.py.example` can be overridden at runtime with an
+environment variable named `NBZX_` followed by the uppercase configuration key.
+Environment variables take precedence over both `config.py` and the built-in
+defaults. For example:
+
+```sh
+export NBZX_SYNC_VMS=true
+export NBZX_HOSTGROUP_FORMAT="site/role"
+export NBZX_CLEANUP_DELETED_HOSTS=false
+export NBZX_CLEANUP_INSTANCE_ID="production"
+```
+
+Boolean values are case-insensitive; `1`, `true`, `yes`, and `on` enable the
+option, while every other value disables it. Non-boolean values are passed to
+the application as strings. Keep list- and dictionary-based options, such as
+filters and maps, in `config.py` so they retain their required Python types.
+
 ### Set environment variables
 
 Set the following environment variables:
