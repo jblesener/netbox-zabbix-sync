@@ -121,6 +121,11 @@ _STR_ARGS = [
         "MODE",
     ),
     (
+        "esxi_adopted_hostid_cf",
+        "NetBox device custom field for an adopted vSphere LLD host ID.",
+        "FIELD",
+    ),
+    (
         "inventory_mode",
         "Zabbix inventory mode: disabled, manual, or automatic.",
         "MODE",

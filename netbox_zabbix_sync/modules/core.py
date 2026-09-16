@@ -432,8 +432,11 @@ class Sync:
 
     def _infer_cluster_site(self, nb_cluster):
         """Infer a cluster site when all attached devices share one site."""
+        if self.netbox is None:
+            raise SyncError("NetBox connection is not initialized.")
+        netbox = cast(Any, self.netbox)
         devices = list(
-            self.netbox.dcim.devices.filter(cluster_id=self._record_id(nb_cluster))
+            netbox.dcim.devices.filter(cluster_id=self._record_id(nb_cluster))
         )
         sites = [getattr(device, "site", None) for device in devices]
         sites = [site for site in sites if site]
@@ -654,17 +657,17 @@ class Sync:
                     f"removed due to NetBox status {device.status}",
                     intentional=True,
                 )
-                return True
-            # Device has been added to NetBox but is not in Activate state
-            logger.info(
-                "Host %s: Skipping since this host is not in the active state.",
-                device.name,
-            )
-            summary.record(
-                summary_label,
-                f"excluded due to NetBox status {device.status}",
-                intentional=True,
-            )
+            else:
+                # Device has been added to NetBox but is not in Activate state
+                logger.info(
+                    "Host %s: Skipping since this host is not in the active state.",
+                    device.name,
+                )
+                summary.record(
+                    summary_label,
+                    f"excluded due to NetBox status {device.status}",
+                    intentional=True,
+                )
             return True
         # Check if the device is in the disabled state
         if device.status in device_config["zabbix_device_disable"]:
@@ -693,6 +696,7 @@ class Sync:
                 cleanup_ownership=cleanup_ownership,
                 hostgroup_resolver=resolve_hostgroups,
             )
+            device.sync_adopted_esxi_lld_host()
             return True
         if not resolve_hostgroups():
             logger.warning(
@@ -710,6 +714,9 @@ class Sync:
             summary.record(
                 summary_label, "Zabbix host already exists without NetBox linkage"
             )
+        else:
+            device.sync_adopted_esxi_lld_host()
+        return True
 
     def _process_azure_subscription(
         self,

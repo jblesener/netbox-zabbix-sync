@@ -50,6 +50,7 @@ def test_load_config_defaults():
             "Azure Virtual Machine by HTTP"
         ]
         assert config["azure_vm_resource_id_cf"] == ""
+        assert config["esxi_adopted_hostid_cf"] == ""
         assert config["sync_lld_hostgroups"] is False
         assert config["lld_usermacro_overrides"] == [
             "{$TOTAL_MEMORY}",
@@ -220,3 +221,13 @@ def test_lld_hostgroup_sync_can_be_overridden_on_the_cli():
     result = _apply_cli_overrides(config, Namespace(sync_lld_hostgroups=True))
 
     assert result["sync_lld_hostgroups"] is True
+
+
+def test_esxi_adopted_host_field_can_be_overridden_on_the_cli():
+    config = DEFAULT_CONFIG.copy()
+
+    result = _apply_cli_overrides(
+        config, Namespace(esxi_adopted_hostid_cf="vsphere_lld_hostid")
+    )
+
+    assert result["esxi_adopted_hostid_cf"] == "vsphere_lld_hostid"

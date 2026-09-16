@@ -672,6 +672,15 @@ class PhysicalDevice:
         )
         return False
 
+    def _uses_esxi_dual_host_mode(self):
+        """Return whether this device keeps dedicated and LLD Zabbix host links."""
+        return bool(
+            self.hostgroup_type == "dev"
+            and self.config.get("esxi_adopted_hostid_cf")
+            and self._is_adoption_candidate()
+            and "esxi" in self._platform_name().lower()
+        )
+
     def _zabbix_name_lookup_candidates(self):
         """Build host.get filters for name-based lookup."""
         lookups = [{"host": self.name}]
@@ -717,21 +726,15 @@ class PhysicalDevice:
                 return True
         return False
 
-    def adopt_existing_zabbix_host(self):
-        """
-        Link to an existing Zabbix host by name if this object is in adoption scope.
-
-        Returns True when adoption succeeded, otherwise False.
-        """
-        if self.zabbix_id or not self._is_adoption_candidate():
-            return False
+    def _find_unique_existing_zabbix_host(self, exclude_hostid=None):
+        """Return one existing host matched by name, or ``None`` when unsafe."""
         matches = {}
         try:
             for lookup_tuple in self._zabbix_name_lookup_candidates():
                 lookup = dict(lookup_tuple)
                 for host in self.zabbix.host.get(
                     filter=lookup,
-                    output=["hostid", "host", "name"],
+                    output=["hostid", "host", "name", "flags"],
                     selectParentTemplates=["templateid", "name"],
                     selectInventory="extend",
                     selectMacros=["macro", "value"],
@@ -744,11 +747,13 @@ class PhysicalDevice:
             self.logger.error(message)
             raise SyncExternalError(message) from e
 
+        if exclude_hostid is not None:
+            matches.pop(str(exclude_hostid), None)
         if not matches:
             self.logger.debug(
                 "Host %s: No existing Zabbix host matched for adoption.", self.name
             )
-            return False
+            return None
         resource_matches = {
             hostid: host
             for hostid, host in matches.items()
@@ -761,12 +766,51 @@ class PhysicalDevice:
                 "Host %s: Multiple Zabbix hosts matched by name. Skipping adoption.",
                 self.name,
             )
+            return None
+        return next(iter(matches.values()))
+
+    def _save_zabbix_hostid_custom_field(self, field_name, hostid, link_name):
+        """Persist a Zabbix host ID in NetBox, restoring local state on failure."""
+        previous_custom_field = self.nb.custom_fields.get(field_name)
+        self.nb.custom_fields[field_name] = hostid
+        try:
+            self.nb.save()
+        except NetboxRequestError as e:
+            self.nb.custom_fields[field_name] = previous_custom_field
+            message = (
+                f"Host {self.name}: Unable to save the {link_name} Zabbix host ID in "
+                f"NetBox. NetBox returned {e}. Check the NetBox object data for "
+                "validation conflicts, such as platform and device type "
+                "compatibility."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from e
+
+    def adopt_existing_zabbix_host(self):
+        """
+        Link to an existing Zabbix host by name if this object is in adoption scope.
+
+        Returns True when adoption succeeded, otherwise False.
+        """
+        if (
+            self.zabbix_id
+            or not self._is_adoption_candidate()
+            or self._uses_esxi_dual_host_mode()
+        ):
+            return False
+        host = self._find_unique_existing_zabbix_host()
+        if not host:
             return False
 
-        host = next(iter(matches.values()))
+        previous_zabbix_id = self.zabbix_id
         self.zabbix_id = int(host["hostid"])
-        self.nb.custom_fields[self.device_cf] = self.zabbix_id
-        self.nb.save()
+        try:
+            self._save_zabbix_hostid_custom_field(
+                self.device_cf, self.zabbix_id, "adopted"
+            )
+        except SyncExternalError:
+            self.zabbix_id = previous_zabbix_id
+            raise
         if self._host_has_azure_discovered_template(host):
             self.adopted_azure_discovered_host = True
         self.logger.info(
@@ -774,6 +818,112 @@ class PhysicalDevice:
             self.name,
             self.zabbix_id,
         )
+        return True
+
+    def _get_esxi_adopted_host_field(self):
+        """Return the configured LLD host-ID field or raise for a bad NetBox object."""
+        field_name = self.config.get("esxi_adopted_hostid_cf")
+        if field_name not in self.nb.custom_fields:
+            message = (
+                f"Host {self.name}: Custom field {field_name} not present for "
+                "adopted vSphere LLD host ID."
+            )
+            self.logger.error(message)
+            raise SyncInventoryError(message)
+        return field_name
+
+    def _get_adopted_esxi_lld_host(self, hostid):
+        """Retrieve the discovery-owned vSphere host used for metadata sync."""
+        try:
+            hosts = self.zabbix.host.get(
+                filter={"hostid": hostid},
+                output=["hostid", "flags"],
+                selectMacros=[
+                    "hostmacroid",
+                    "macro",
+                    "value",
+                    "type",
+                    "description",
+                    "automatic",
+                ],
+                selectTags=["tag", "value", "automatic"],
+            )
+        except APIRequestError as e:
+            message = (
+                f"Host {self.name}: Unable to retrieve adopted vSphere LLD host "
+                f"{hostid}. Zabbix returned {e}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from e
+        if len(hosts) != 1:
+            self.logger.warning(
+                "Host %s: Adopted vSphere LLD host ID %s no longer resolves uniquely.",
+                self.name,
+                hostid,
+            )
+            return None
+        host = hosts[0]
+        if not self._is_discovered_host(host):
+            self.logger.warning(
+                "Host %s: Zabbix host ID %s is not LLD-created; skipping adopted "
+                "vSphere metadata sync.",
+                self.name,
+                hostid,
+            )
+            return None
+        return host
+
+    def _update_zabbix_host_by_id(self, hostid, **kwargs):
+        """Update an explicit Zabbix host without changing this object's main link."""
+        try:
+            self.zabbix.host.update(hostid=hostid, **kwargs)
+        except APIRequestError as e:
+            message = (
+                f"Host {self.name}: Unable to update Zabbix host {hostid}. "
+                f"Zabbix returned the following error: {e}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from e
+        self.logger.info(
+            "Host %s: updated Zabbix host %s with data %s.",
+            self.name,
+            hostid,
+            sanatize_log_output(kwargs),
+        )
+        self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
+
+    def sync_adopted_esxi_lld_host(self):
+        """Adopt and safely enrich the separate vSphere LLD host for this ESXi device."""
+        if not self._uses_esxi_dual_host_mode():
+            return False
+        field_name = self._get_esxi_adopted_host_field()
+        adopted_hostid = self.nb.custom_fields[field_name]
+        if adopted_hostid:
+            host = self._get_adopted_esxi_lld_host(adopted_hostid)
+        else:
+            match = self._find_unique_existing_zabbix_host(
+                exclude_hostid=self.zabbix_id
+            )
+            if not match:
+                return False
+            if not self._is_discovered_host(match):
+                self.logger.warning(
+                    "Host %s: Matched Zabbix host %s is not LLD-created; skipping "
+                    "vSphere adoption.",
+                    self.name,
+                    match["hostid"],
+                )
+                return False
+            adopted_hostid = int(match["hostid"])
+            self._save_zabbix_hostid_custom_field(
+                field_name, adopted_hostid, "adopted vSphere LLD"
+            )
+            host = self._get_adopted_esxi_lld_host(adopted_hostid)
+        if not host:
+            return False
+
+        self._sync_discovered_macros(host, hostid=adopted_hostid)
+        self._sync_discovered_tags(host, hostid=adopted_hostid)
         return True
 
     @staticmethod
@@ -889,7 +1039,7 @@ class PhysicalDevice:
         self.logger.info("Host %s: Hostgroups OUT of sync.", self.name)
         self.update_zabbix_host(groups=desired)
 
-    def _sync_discovered_macros(self, host):
+    def _sync_discovered_macros(self, host, hostid=None):
         """Sync manual macros without deleting protected LLD-created macros."""
         if not self.config["usermacro_sync"]:
             return
@@ -974,9 +1124,9 @@ class PhysicalDevice:
                 self.name,
                 macro_name,
             )
-        self.update_zabbix_host(macros=update_macros)
+        self._update_zabbix_host_by_id(hostid or self.zabbix_id, macros=update_macros)
 
-    def _sync_discovered_tags(self, host):
+    def _sync_discovered_tags(self, host, hostid=None):
         """Sync manual tags without deleting tags created by LLD."""
         if not self.config["tag_sync"]:
             return
@@ -1001,7 +1151,7 @@ class PhysicalDevice:
             return
 
         self.logger.info("Host %s: Tags OUT of sync.", self.name)
-        self.update_zabbix_host(tags=desired)
+        self._update_zabbix_host_by_id(hostid or self.zabbix_id, tags=desired)
 
     def _sync_discovered_host(self, host, sync_hostgroups=False):
         """Reconcile the NetBox-managed parts of an LLD-created host."""

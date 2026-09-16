@@ -296,6 +296,7 @@ adopt_existing_hosts = True
 adopt_scope = "esxi"           # "esxi", "azure", "cloud", or "all"
 adopt_for_vms = True           # include VMs in adoption scope checks
 adopt_enrich_mode = "full"     # "full" or "metadata_only"
+esxi_adopted_hostid_cf = ""    # optional device CF for a vSphere LLD host ID
 sync_lld_hostgroups = False    # preserve all existing groups on LLD hosts
 lld_usermacro_overrides = ["{$TOTAL_MEMORY}", "{$DEV_ROLE}", "{$NB_URL}", "{$NB_ID}"]
 ```
@@ -305,6 +306,23 @@ Behavior:
 - Adoption is attempted only for objects in scope.
 - `adopt_scope = "esxi"` matches objects where NetBox `platform` contains
   `ESXi` (case-insensitive).
+- Set `esxi_adopted_hostid_cf` to enable dual-host ESXi adoption. Both
+  `device_cf` and this field must be integer NetBox device custom fields. The
+  syncer creates or fully manages the dedicated ESXi host recorded in
+  `device_cf`, then stores the uniquely name-matched, LLD-created vSphere host
+  in `esxi_adopted_hostid_cf`.
+- The adopted vSphere host receives only the existing LLD-safe enrichment:
+  eligible `lld_usermacro_overrides` and NetBox tags. Its LLD-managed names,
+  templates, groups, interfaces, proxy, status, inventory, and cleanup
+  lifecycle are never changed. If the match is absent, ambiguous, or not
+  LLD-created, the dedicated host remains usable and the adopted host is not
+  linked.
+- NetBox validates platform manufacturer restrictions for every device update,
+  including the custom-field update that records an adopted host ID. An ESXi
+  platform assigned to hardware from multiple vendors must not be restricted to
+  VMware device types. For example, keep a physical Dell server as device type
+  `Dell PowerEdge R760` and remove the VMware manufacturer restriction from the
+  ESXi platform rather than changing the device type manufacturer.
 - `adopt_scope = "azure"` matches VMs where the configured Azure resource ID
   field is populated, or where the VM platform, cluster, cluster type, tenant,
   or tag contains one of `azure_vm_platform_keywords` (default: `["azure"]`).
@@ -325,9 +343,14 @@ Behavior:
 - Azure VM hosts linked to `azure_vm_discovered_templates` (default:
   `["Azure Virtual Machine by HTTP"]`) continue to use metadata-only
   enrichment after adoption.
-- On successful adoption, the script writes the matched `hostid` into the
-  configured NetBox custom field (`device_cf`, or `oob_device_cf` for OOB
-  split imports).
+- Outside dual-host ESXi mode, successful adoption writes the matched `hostid`
+  into the configured NetBox custom field (`device_cf`, or `oob_device_cf` for
+  OOB split imports).
+
+To migrate an ESXi device whose `device_cf` currently points at its LLD host,
+create the new integer custom field, copy the existing ID to it, and clear
+`device_cf`. On the next run, the syncer creates the dedicated host and keeps
+the LLD host as the separate metadata target.
 
 For Azure VM adoption from the `Azure by HTTP` discovery, use:
 

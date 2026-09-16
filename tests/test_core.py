@@ -4,6 +4,7 @@ import unittest
 from typing import ClassVar
 from unittest.mock import MagicMock, call, patch
 
+from pynetbox import RequestError as NetboxRequestError
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from zabbix_utils import APIRequestError
 
@@ -184,9 +185,12 @@ class MockNetboxDevice(MockRecord):
             self.role = role or device_role
 
         self.virtual_chassis = virtual_chassis
+        self.save_error: BaseException | None = None
 
-    def save(self):
+    def save(self) -> None:
         """Mock save method for NetBox device."""
+        if self.save_error is not None:
+            raise self.save_error
 
 
 class MockNetboxVM(MockRecord):
@@ -2532,6 +2536,243 @@ class TestAdoptExistingHosts(unittest.TestCase):
         self.assertEqual(device.custom_fields["zabbix_hostid"], 77)
         mock_zabbix.host.create.assert_not_called()
         mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_esxi_dual_host_creates_dedicated_and_adopts_lld(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Dual-host ESXi mode keeps the dedicated and LLD host IDs separate."""
+        lld_hostid = 77
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-dual-host01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+            config_context={
+                "zabbix": {
+                    "usermacros": {"{$NB_ID}": "1"},
+                    "tags": [{"netbox": "managed"}],
+                }
+            },
+        )
+        device.custom_fields["vsphere_lld_hostid"] = None
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        discovered_host = self._make_lld_zabbix_host("esxi-dual-host01")
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [
+                {
+                    "hostid": "1",
+                    "host": "esxi-dual-host01",
+                    "name": "esxi-dual-host01",
+                    "flags": "0",
+                }
+            ],
+            [
+                {
+                    "hostid": str(lld_hostid),
+                    "host": "esxi-uuid-01",
+                    "name": "esxi-dual-host01",
+                    "flags": "4",
+                }
+            ],
+            [discovered_host],
+        ]
+
+        syncer = Sync(
+            {
+                "adopt_existing_hosts": True,
+                "esxi_adopted_hostid_cf": "vsphere_lld_hostid",
+                "usermacro_sync": "partial",
+                "tag_sync": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
+        self.assertEqual(device.custom_fields["vsphere_lld_hostid"], lld_hostid)
+        mock_zabbix.host.create.assert_called_once()
+        lld_update_keys = {
+            frozenset(update.kwargs).difference({"hostid"})
+            for update in mock_zabbix.host.update.call_args_list
+            if update.kwargs["hostid"] == lld_hostid
+        }
+        self.assertEqual(lld_update_keys, {frozenset({"macros"}), frozenset({"tags"})})
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_esxi_dual_host_skips_ambiguous_lld_match(self, mock_api, mock_zabbix_api):
+        """An ambiguous LLD lookup must not prevent dedicated-host creation."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-dual-host02",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        device.custom_fields["vsphere_lld_hostid"] = None
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [
+                {
+                    "hostid": "1",
+                    "host": "esxi-dual-host02",
+                    "name": "esxi-dual-host02",
+                    "flags": "0",
+                }
+            ],
+            [
+                {
+                    "hostid": "77",
+                    "host": "esxi-uuid-02a",
+                    "name": "esxi-dual-host02",
+                    "flags": "4",
+                },
+                {
+                    "hostid": "78",
+                    "host": "esxi-uuid-02b",
+                    "name": "esxi-dual-host02",
+                    "flags": "4",
+                },
+            ],
+        ]
+
+        syncer = Sync(
+            {
+                "adopt_existing_hosts": True,
+                "esxi_adopted_hostid_cf": "vsphere_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
+        self.assertIsNone(device.custom_fields["vsphere_lld_hostid"])
+        mock_zabbix.host.create.assert_called_once()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_esxi_dual_host_only_enriches_stored_lld_metadata(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A stored LLD link does not receive lifecycle-managed fields."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-dual-host03",
+            status_label="Active",
+            zabbix_hostid=42,
+            platform=platform,
+        )
+        device.custom_fields["vsphere_lld_hostid"] = 77
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        dedicated_host = self._make_zabbix_host("esxi-dual-host03")[0]
+        discovered_host = self._make_lld_zabbix_host("esxi-dual-host03")
+        mock_zabbix.host.get.side_effect = [[dedicated_host], [discovered_host]]
+
+        syncer = Sync(
+            {
+                "adopt_existing_hosts": True,
+                "esxi_adopted_hostid_cf": "vsphere_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adoption_save_rejection_is_reported_per_device(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A NetBox validation error does not falsely link or abort the sync."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-host-platform-conflict",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        response = MagicMock()
+        response.status_code = 400
+        response.reason = "Bad Request"
+        response.json.return_value = {
+            "platform": [
+                "The assigned platform is limited to VMware Inc. device types."
+            ]
+        }
+        response.request.body = b'{"custom_fields":{"zabbix_hostid":77}}'
+        response.url = "http://netbox.local/api/dcim/devices/1/"
+        response.text = str(response.json.return_value)
+        device.save_error = NetboxRequestError(response)
+
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = [
+            [
+                {
+                    "hostid": "77",
+                    "host": "esxi-host-platform-conflict",
+                    "name": "esxi-host-platform-conflict",
+                }
+            ],
+            [],
+        ]
+
+        syncer = Sync({"adopt_existing_hosts": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertIsNone(device.custom_fields["zabbix_hostid"])
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+        summary = syncer.last_unsynced_summary
+        assert summary is not None
+        self.assertEqual(
+            summary.failures["external NetBox or Zabbix sync error"],
+            ["Device esxi-host-platform-conflict"],
+        )
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
