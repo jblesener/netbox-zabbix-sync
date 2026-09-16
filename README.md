@@ -296,6 +296,7 @@ adopt_existing_hosts = True
 adopt_scope = "esxi"           # "esxi", "azure", "cloud", or "all"
 adopt_for_vms = True           # include VMs in adoption scope checks
 adopt_enrich_mode = "full"     # "full" or "metadata_only"
+adopt_fqdn_normalization = False  # match FQDNs with short names during adoption
 esxi_adopted_hostid_cf = ""    # optional device CF for a vSphere LLD host ID
 sync_lld_hostgroups = False    # preserve all existing groups on LLD hosts
 lld_usermacro_overrides = ["{$TOTAL_MEMORY}", "{$DEV_ROLE}", "{$NB_URL}", "{$NB_ID}"]
@@ -328,6 +329,11 @@ Behavior:
   or tag contains one of `azure_vm_platform_keywords` (default: `["azure"]`).
 - A unique name match in Zabbix is required. If multiple hosts match, adoption
   is skipped for safety.
+- Set `adopt_fqdn_normalization = True` to also match the first DNS label of
+  FQDNs during adoption. This lets `vmhost1` match
+  `vmhost1.example.com` in either direction, for both technical and visible
+  Zabbix names. Exact matching remains enabled; if normalized matching finds
+  multiple hosts with the same short name, adoption is skipped for safety.
 - LLD-created hosts (including VMware-discovered VMs) retain discovery-owned
   fields: technical and visible names, LLD-linked templates, prototype groups,
   automatic tags/macros, and scalar host settings. The macros named by

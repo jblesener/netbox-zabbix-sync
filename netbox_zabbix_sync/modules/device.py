@@ -690,6 +690,24 @@ class PhysicalDevice:
             lookups.append({"name": self.name})
         return list(dict.fromkeys(tuple(sorted(i.items())) for i in lookups))
 
+    @staticmethod
+    def _short_hostname(value):
+        """Return the case-insensitive short name for a hostname value."""
+        if value is None:
+            return ""
+        return str(value).split(".", 1)[0].lower()
+
+    def _zabbix_normalized_name_lookup_candidates(self):
+        """Build field, original-name, and short-name tuples for adoption searches."""
+        visible_name = self.visible_name if self.use_visible_name else self.name
+        return list(
+            dict.fromkeys(
+                (field, str(value), self._short_hostname(value))
+                for field, value in (("host", self.name), ("name", visible_name))
+                if value
+            )
+        )
+
     def _host_azure_resource_id_matches(self, host):
         """Return whether the Zabbix host metadata contains the configured Azure ID."""
         resource_id = self._azure_resource_id()
@@ -742,6 +760,26 @@ class PhysicalDevice:
                 ):
                     if "hostid" in host:
                         matches[host["hostid"]] = host
+            if self.config.get("adopt_fqdn_normalization"):
+                for (
+                    field,
+                    source_name,
+                    short_name,
+                ) in self._zabbix_normalized_name_lookup_candidates():
+                    for host in self.zabbix.host.get(
+                        search={field: short_name},
+                        output=["hostid", "host", "name", "flags"],
+                        selectParentTemplates=["templateid", "name"],
+                        selectInventory="extend",
+                        selectMacros=["macro", "value"],
+                        selectTags=["tag", "value"],
+                    ):
+                        if (
+                            "hostid" in host
+                            and self._short_hostname(host.get(field)) == short_name
+                            and ("." in source_name or "." in str(host.get(field, "")))
+                        ):
+                            matches[host["hostid"]] = host
         except APIRequestError as e:
             message = f"Host {self.name}: Adoption lookup failed. Zabbix returned {e}."
             self.logger.error(message)

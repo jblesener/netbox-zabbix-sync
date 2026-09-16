@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "adopt_scope": "esxi",
     "adopt_for_vms": True,
     "adopt_enrich_mode": "full",
+    "adopt_fqdn_normalization": False,
     "esxi_adopted_hostid_cf": "",
     "sync_lld_hostgroups": False,
     "lld_usermacro_overrides": [

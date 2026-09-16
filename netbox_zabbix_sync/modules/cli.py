@@ -23,6 +23,10 @@ _BOOL_ARGS = [
         "Allow host adoption for virtual machines when adoption is enabled.",
     ),
     (
+        "adopt_fqdn_normalization",
+        "Match FQDNs and short names when adopting existing Zabbix hosts by name.",
+    ),
+    (
         "sync_lld_hostgroups",
         "Reconcile NetBox hostgroups for hosts created by Zabbix low-level discovery.",
     ),

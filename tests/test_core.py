@@ -2539,6 +2539,170 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopt_existing_esxi_device_by_short_name_matches_visible_fqdn(
+        self, mock_api, mock_zabbix_api
+    ):
+        """FQDN normalization adopts a Zabbix visible FQDN for a short name."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-fqdn01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [],
+            [],
+            [
+                {
+                    "hostid": "77",
+                    "host": "zabbix-id-01",
+                    "name": "esxi-fqdn01.example.com",
+                }
+            ],
+            self._make_zabbix_host(hostname="esxi-fqdn01", status="0"),
+        ]
+
+        syncer = Sync({"adopt_existing_hosts": True, "adopt_fqdn_normalization": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.create.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_adopt_existing_esxi_device_by_fqdn_matches_short_name(
+        self, mock_api, mock_zabbix_api
+    ):
+        """FQDN normalization adopts a Zabbix short name for a NetBox FQDN."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-fqdn02.example.com",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [],
+            [{"hostid": "77", "host": "esxi-fqdn02", "name": "esxi-fqdn02"}],
+            [],
+            self._make_zabbix_host(hostname="esxi-fqdn02.example.com", status="0"),
+        ]
+
+        syncer = Sync({"adopt_existing_hosts": True, "adopt_fqdn_normalization": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 77)
+        mock_zabbix.host.create.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_fqdn_normalization_is_disabled_by_default(self, mock_api, mock_zabbix_api):
+        """Without the option, adoption retains exact-name matching only."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-fqdn03",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.return_value = []
+
+        syncer = Sync({"adopt_existing_hosts": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
+        mock_zabbix.host.create.assert_called_once()
+        self.assertFalse(
+            any("search" in call.kwargs for call in mock_zabbix.host.get.call_args_list)
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_fqdn_normalization_skips_ambiguous_short_name_matches(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Shared short names from FQDN matching must not be adopted."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        device = MockNetboxDevice(
+            name="esxi-fqdn04",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [],
+            [
+                {
+                    "hostid": "77",
+                    "host": "esxi-fqdn04.example.com",
+                    "name": "esxi-fqdn04.example.com",
+                },
+                {
+                    "hostid": "78",
+                    "host": "esxi-fqdn04.example.net",
+                    "name": "esxi-fqdn04.example.net",
+                },
+            ],
+            [],
+            [{"hostid": "77"}],
+        ]
+
+        syncer = Sync({"adopt_existing_hosts": True, "adopt_fqdn_normalization": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertIsNone(device.custom_fields["zabbix_hostid"])
+        mock_zabbix.host.create.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_esxi_dual_host_creates_dedicated_and_adopts_lld(
         self, mock_api, mock_zabbix_api
     ):

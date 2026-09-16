@@ -100,6 +100,10 @@ azure_vm_discovered_templates = ["Azure Virtual Machine by HTTP"]
 # host/name, inventory, user macros, or tags to narrow ambiguous name matches.
 azure_vm_resource_id_cf = ""
 
+# Existing-host adoption can match an FQDN with its short name when enabled.
+# This applies only to adoption lookups and requires a unique Zabbix match.
+adopt_fqdn_normalization = False
+
 # ESXi dual-host adoption. When enabled with adopt_existing_hosts, device_cf
 # stores a dedicated, fully managed Zabbix host and this integer custom field
 # stores the separately adopted vSphere LLD host. The LLD host receives only
