@@ -553,6 +553,7 @@ class Sync:
                 cleanup_ownership=cleanup_ownership,
                 hostgroup_resolver=resolve_hostgroups,
             )
+            vm.sync_adopted_lld_host()
             return
         if not resolve_hostgroups():
             summary.record(summary_label, "no usable Zabbix hostgroup")
@@ -565,6 +566,8 @@ class Sync:
             summary.record(
                 summary_label, "Zabbix host already exists without NetBox linkage"
             )
+        else:
+            vm.sync_adopted_lld_host()
 
     def _process_device(
         self,

@@ -51,6 +51,7 @@ def test_load_config_defaults():
         ]
         assert config["azure_vm_resource_id_cf"] == ""
         assert config["esxi_adopted_hostid_cf"] == ""
+        assert config["vmware_vm_adopted_hostid_cf"] == ""
         assert config["adopt_fqdn_normalization"] is False
         assert config["sync_lld_hostgroups"] is False
         assert config["lld_usermacro_overrides"] == [
@@ -240,3 +241,13 @@ def test_esxi_adopted_host_field_can_be_overridden_on_the_cli():
     )
 
     assert result["esxi_adopted_hostid_cf"] == "vsphere_lld_hostid"
+
+
+def test_vmware_vm_adopted_host_field_can_be_overridden_on_the_cli():
+    config = DEFAULT_CONFIG.copy()
+
+    result = _apply_cli_overrides(
+        config, Namespace(vmware_vm_adopted_hostid_cf="vmware_lld_hostid")
+    )
+
+    assert result["vmware_vm_adopted_hostid_cf"] == "vmware_lld_hostid"

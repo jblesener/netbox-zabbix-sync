@@ -681,6 +681,20 @@ class PhysicalDevice:
             and "esxi" in self._platform_name().lower()
         )
 
+    def _uses_vmware_vm_dual_host_mode(self):
+        """Return whether this VM keeps dedicated and VMware LLD host links."""
+        return bool(
+            self.hostgroup_type == "vm"
+            and self.config.get("vmware_vm_adopted_hostid_cf")
+            and self.config.get("adopt_existing_hosts")
+            and self.config.get("adopt_for_vms", True)
+            and "vmware" in self._platform_name().lower()
+        )
+
+    def _uses_lld_dual_host_mode(self):
+        """Return whether this object manages a dedicated host and linked LLD host."""
+        return self._uses_esxi_dual_host_mode() or self._uses_vmware_vm_dual_host_mode()
+
     def _zabbix_name_lookup_candidates(self):
         """Build host.get filters for name-based lookup."""
         lookups = [{"host": self.name}]
@@ -833,7 +847,7 @@ class PhysicalDevice:
         if (
             self.zabbix_id
             or not self._is_adoption_candidate()
-            or self._uses_esxi_dual_host_mode()
+            or self._uses_lld_dual_host_mode()
         ):
             return False
         host = self._find_unique_existing_zabbix_host()
@@ -858,20 +872,25 @@ class PhysicalDevice:
         )
         return True
 
-    def _get_esxi_adopted_host_field(self):
+    def _get_adopted_lld_host_field(self):
         """Return the configured LLD host-ID field or raise for a bad NetBox object."""
-        field_name = self.config.get("esxi_adopted_hostid_cf")
+        if self._uses_esxi_dual_host_mode():
+            field_name = self.config.get("esxi_adopted_hostid_cf")
+            host_type = "vSphere"
+        else:
+            field_name = self.config.get("vmware_vm_adopted_hostid_cf")
+            host_type = "VMware VM Discovery"
         if field_name not in self.nb.custom_fields:
             message = (
                 f"Host {self.name}: Custom field {field_name} not present for "
-                "adopted vSphere LLD host ID."
+                f"adopted {host_type} LLD host ID."
             )
             self.logger.error(message)
             raise SyncInventoryError(message)
         return field_name
 
-    def _get_adopted_esxi_lld_host(self, hostid):
-        """Retrieve the discovery-owned vSphere host used for metadata sync."""
+    def _get_adopted_lld_host(self, hostid):
+        """Retrieve the discovery-owned host used for metadata synchronization."""
         try:
             hosts = self.zabbix.host.get(
                 filter={"hostid": hostid},
@@ -888,14 +907,14 @@ class PhysicalDevice:
             )
         except APIRequestError as e:
             message = (
-                f"Host {self.name}: Unable to retrieve adopted vSphere LLD host "
+                f"Host {self.name}: Unable to retrieve adopted LLD host "
                 f"{hostid}. Zabbix returned {e}."
             )
             self.logger.error(message)
             raise SyncExternalError(message) from e
         if len(hosts) != 1:
             self.logger.warning(
-                "Host %s: Adopted vSphere LLD host ID %s no longer resolves uniquely.",
+                "Host %s: Adopted LLD host ID %s no longer resolves uniquely.",
                 self.name,
                 hostid,
             )
@@ -904,7 +923,7 @@ class PhysicalDevice:
         if not self._is_discovered_host(host):
             self.logger.warning(
                 "Host %s: Zabbix host ID %s is not LLD-created; skipping adopted "
-                "vSphere metadata sync.",
+                "LLD metadata sync.",
                 self.name,
                 hostid,
             )
@@ -930,14 +949,14 @@ class PhysicalDevice:
         )
         self.create_journal_entry("info", "Updated host in Zabbix with latest NB data.")
 
-    def sync_adopted_esxi_lld_host(self):
-        """Adopt and safely enrich the separate vSphere LLD host for this ESXi device."""
-        if not self._uses_esxi_dual_host_mode():
+    def sync_adopted_lld_host(self):
+        """Adopt and safely enrich this object's separate LLD host."""
+        if not self._uses_lld_dual_host_mode():
             return False
-        field_name = self._get_esxi_adopted_host_field()
+        field_name = self._get_adopted_lld_host_field()
         adopted_hostid = self.nb.custom_fields[field_name]
         if adopted_hostid:
-            host = self._get_adopted_esxi_lld_host(adopted_hostid)
+            host = self._get_adopted_lld_host(adopted_hostid)
         else:
             match = self._find_unique_existing_zabbix_host(
                 exclude_hostid=self.zabbix_id
@@ -947,22 +966,26 @@ class PhysicalDevice:
             if not self._is_discovered_host(match):
                 self.logger.warning(
                     "Host %s: Matched Zabbix host %s is not LLD-created; skipping "
-                    "vSphere adoption.",
+                    "LLD adoption.",
                     self.name,
                     match["hostid"],
                 )
                 return False
             adopted_hostid = int(match["hostid"])
             self._save_zabbix_hostid_custom_field(
-                field_name, adopted_hostid, "adopted vSphere LLD"
+                field_name, adopted_hostid, "adopted LLD"
             )
-            host = self._get_adopted_esxi_lld_host(adopted_hostid)
+            host = self._get_adopted_lld_host(adopted_hostid)
         if not host:
             return False
 
         self._sync_discovered_macros(host, hostid=adopted_hostid)
         self._sync_discovered_tags(host, hostid=adopted_hostid)
         return True
+
+    def sync_adopted_esxi_lld_host(self):
+        """Adopt and safely enrich the separate vSphere LLD host for an ESXi device."""
+        return self.sync_adopted_lld_host()
 
     @staticmethod
     def _is_discovered_host(host):

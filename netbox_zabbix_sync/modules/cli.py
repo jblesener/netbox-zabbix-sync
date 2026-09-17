@@ -130,6 +130,11 @@ _STR_ARGS = [
         "FIELD",
     ),
     (
+        "vmware_vm_adopted_hostid_cf",
+        "NetBox VM custom field for an adopted VMware VM Discovery host ID.",
+        "FIELD",
+    ),
+    (
         "inventory_mode",
         "Zabbix inventory mode: disabled, manual, or automatic.",
         "MODE",

@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     "adopt_enrich_mode": "full",
     "adopt_fqdn_normalization": False,
     "esxi_adopted_hostid_cf": "",
+    "vmware_vm_adopted_hostid_cf": "",
     "sync_lld_hostgroups": False,
     "lld_usermacro_overrides": [
         "{$TOTAL_MEMORY}",

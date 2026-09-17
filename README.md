@@ -285,7 +285,7 @@ Make sure that the Zabbix user has proper permissions to create hosts. The
 hostgroups are in a nested format. This means that proper permissions only need
 to be applied to the site name hostgroup and cascaded to any child hostgroups.
 
-### Existing host adoption (ESXi-first)
+### Existing host adoption and LLD dual-hosts
 
 You can let the syncer adopt existing Zabbix hosts when the NetBox host ID
 custom field is empty. This is useful when hosts are pre-created by Zabbix
@@ -298,6 +298,7 @@ adopt_for_vms = True           # include VMs in adoption scope checks
 adopt_enrich_mode = "full"     # "full" or "metadata_only"
 adopt_fqdn_normalization = False  # match FQDNs with short names during adoption
 esxi_adopted_hostid_cf = ""    # optional device CF for a vSphere LLD host ID
+vmware_vm_adopted_hostid_cf = ""  # optional VM CF for a VMware VM Discovery host ID
 sync_lld_hostgroups = False    # preserve all existing groups on LLD hosts
 lld_usermacro_overrides = ["{$TOTAL_MEMORY}", "{$DEV_ROLE}", "{$NB_URL}", "{$NB_ID}"]
 ```
@@ -312,6 +313,14 @@ Behavior:
   syncer creates or fully manages the dedicated ESXi host recorded in
   `device_cf`, then stores the uniquely name-matched, LLD-created vSphere host
   in `esxi_adopted_hostid_cf`.
+- Set `vmware_vm_adopted_hostid_cf` with `adopt_existing_hosts = True` and
+  `adopt_for_vms = True` to enable VMware VM Discovery dual-host adoption. Both
+  `device_cf` and this field must be integer NetBox VM custom fields. For a VM
+  whose platform contains `VMware` (case-insensitive), the syncer creates or
+  fully manages the dedicated host recorded in `device_cf`, then stores the
+  uniquely name-matched, LLD-created VMware VM Discovery host in
+  `vmware_vm_adopted_hostid_cf`. This VM-specific opt-in is independent of
+  `adopt_scope`, which continues to control ordinary primary-host adoption.
 - The adopted vSphere host receives only the existing LLD-safe enrichment:
   eligible `lld_usermacro_overrides` and NetBox tags. Its LLD-managed names,
   templates, groups, interfaces, proxy, status, inventory, and cleanup
@@ -349,14 +358,20 @@ Behavior:
 - Azure VM hosts linked to `azure_vm_discovered_templates` (default:
   `["Azure Virtual Machine by HTTP"]`) continue to use metadata-only
   enrichment after adoption.
-- Outside dual-host ESXi mode, successful adoption writes the matched `hostid`
-  into the configured NetBox custom field (`device_cf`, or `oob_device_cf` for
-  OOB split imports).
+- Outside dual-host ESXi and VMware VM Discovery modes, successful adoption
+  writes the matched `hostid` into the configured NetBox custom field
+  (`device_cf`, or `oob_device_cf` for OOB split imports).
 
 To migrate an ESXi device whose `device_cf` currently points at its LLD host,
 create the new integer custom field, copy the existing ID to it, and clear
 `device_cf`. On the next run, the syncer creates the dedicated host and keeps
 the LLD host as the separate metadata target.
+
+To migrate a VMware-discovered VM whose `device_cf` currently points at its LLD
+host, create the VM integer custom field configured by
+`vmware_vm_adopted_hostid_cf`, copy the existing ID to it, and clear
+`device_cf`. On the next run, the syncer creates the dedicated VM host and
+keeps the VMware VM Discovery host as the separate metadata target.
 
 For Azure VM adoption from the `Azure by HTTP` discovery, use:
 

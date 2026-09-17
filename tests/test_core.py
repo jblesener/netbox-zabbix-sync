@@ -2879,6 +2879,331 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_dual_host_creates_dedicated_and_adopts_lld(
+        self, mock_api, mock_zabbix_api
+    ):
+        """VMware VM Discovery links a separate LLD host after VM creation."""
+        lld_hostid = 77
+        platform = MagicMock()
+        platform.name = "VMware vSphere"
+        vm = MockNetboxVM(
+            name="vmware-dual-host01",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+            config_context={
+                "zabbix": {
+                    "templates": ["TestTemplate"],
+                    "usermacros": {"{$NB_ID}": "1"},
+                    "tags": [{"netbox": "managed"}],
+                }
+            },
+        )
+        vm.custom_fields["vmware_lld_hostid"] = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        discovered_host = self._make_lld_zabbix_host("vmware-dual-host01")
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [
+                {
+                    "hostid": "1",
+                    "host": "vmware-dual-host01",
+                    "name": "vmware-dual-host01",
+                    "flags": "0",
+                }
+            ],
+            [
+                {
+                    "hostid": str(lld_hostid),
+                    "host": "vmware-uuid-01",
+                    "name": "vmware-dual-host01",
+                    "flags": "4",
+                }
+            ],
+            [discovered_host],
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+                "usermacro_sync": "partial",
+                "tag_sync": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+        self.assertEqual(vm.custom_fields["vmware_lld_hostid"], lld_hostid)
+        mock_zabbix.host.create.assert_called_once()
+        lld_update_keys = {
+            frozenset(update.kwargs).difference({"hostid"})
+            for update in mock_zabbix.host.update.call_args_list
+            if update.kwargs["hostid"] == lld_hostid
+        }
+        self.assertEqual(lld_update_keys, {frozenset({"macros"}), frozenset({"tags"})})
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_dual_host_skips_unsafe_lld_matches(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Ambiguous LLD candidates leave the dedicated VM usable."""
+        platform = MagicMock()
+        platform.name = "VMware vSphere"
+        vm = MockNetboxVM(
+            name="vmware-dual-host02",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        vm.custom_fields["vmware_lld_hostid"] = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [
+                {
+                    "hostid": "1",
+                    "host": "vmware-dual-host02",
+                    "name": "vmware-dual-host02",
+                    "flags": "0",
+                }
+            ],
+            [
+                {
+                    "hostid": "77",
+                    "host": "vmware-uuid-02a",
+                    "name": "vmware-dual-host02",
+                    "flags": "4",
+                },
+                {
+                    "hostid": "78",
+                    "host": "vmware-uuid-02b",
+                    "name": "vmware-dual-host02",
+                    "flags": "4",
+                },
+            ],
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+        self.assertIsNone(vm.custom_fields["vmware_lld_hostid"])
+        mock_zabbix.host.create.assert_called_once()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_dual_host_skips_non_lld_match(self, mock_api, mock_zabbix_api):
+        """A non-LLD candidate cannot be stored as the VMware discovery host."""
+        platform = MagicMock()
+        platform.name = "VMware vSphere"
+        vm = MockNetboxVM(
+            name="vmware-dual-host-non-lld",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        vm.custom_fields["vmware_lld_hostid"] = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [],
+            [
+                {
+                    "hostid": "1",
+                    "host": "vmware-dual-host-non-lld",
+                    "name": "vmware-dual-host-non-lld",
+                    "flags": "0",
+                }
+            ],
+            [
+                {
+                    "hostid": "77",
+                    "host": "vmware-dual-host-non-lld-existing",
+                    "name": "vmware-dual-host-non-lld",
+                    "flags": "0",
+                }
+            ],
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+        self.assertIsNone(vm.custom_fields["vmware_lld_hostid"])
+        mock_zabbix.host.create.assert_called_once()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_dual_host_only_enriches_stored_lld_metadata(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A stored VMware LLD link does not receive lifecycle-managed fields."""
+        platform = MagicMock()
+        platform.name = "VMware vSphere"
+        vm = MockNetboxVM(
+            name="vmware-dual-host-stored",
+            status_label="Active",
+            zabbix_hostid=42,
+            platform=platform,
+        )
+        vm.custom_fields["vmware_lld_hostid"] = 77
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        dedicated_host = self._make_zabbix_host("vmware-dual-host-stored")[0]
+        discovered_host = self._make_lld_zabbix_host("vmware-dual-host-stored")
+        mock_zabbix.host.get.side_effect = [[dedicated_host], [discovered_host]]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_dual_host_requires_configured_vm_field(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A missing secondary field cannot prevent dedicated VM creation."""
+        platform = MagicMock()
+        platform.name = "VMware vSphere"
+        vm = MockNetboxVM(
+            name="vmware-dual-host03",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.return_value = []
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+        mock_zabbix.host.create.assert_called_once()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_dual_host_ignores_non_vmware_vms(
+        self, mock_api, mock_zabbix_api
+    ):
+        """The VM-specific setting leaves non-VMware VM sync unchanged."""
+        platform = MagicMock()
+        platform.name = "Microsoft Azure"
+        vm = MockNetboxVM(
+            name="non-vmware-dual-host",
+            status_label="Active",
+            zabbix_hostid=None,
+            platform=platform,
+        )
+        vm.custom_fields["vmware_lld_hostid"] = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.return_value = []
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+        self.assertIsNone(vm.custom_fields["vmware_lld_hostid"])
+        mock_zabbix.host.create.assert_called_once()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_adoption_save_rejection_is_reported_per_device(
         self, mock_api, mock_zabbix_api
     ):
