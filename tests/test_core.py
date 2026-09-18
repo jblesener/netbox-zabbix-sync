@@ -1585,6 +1585,48 @@ class TestDeviceStatusHandling(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_api_metadata_does_not_trigger_group_or_macro_updates(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Read-only Zabbix fields must not make matching state non-idempotent."""
+        device = MockNetboxDevice(
+            name="test-device",
+            status_label="Active",
+            zabbix_hostid=42,
+            config_context={"zabbix": {"usermacros": {"{$NB_ID}": "1"}}},
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        host = self._make_zabbix_host(status="0")[0]
+        host["hostgroups"] = [{"groupid": "1", "flags": "0"}]
+        host["groups"] = [{"groupid": "1", "flags": "0"}]
+        host["macros"] = [
+            {
+                "hostmacroid": "10001",
+                "macro": "{$NB_ID}",
+                "value": "1",
+                "type": "0",
+                "description": "",
+                "automatic": "0",
+            }
+        ]
+        mock_zabbix.host.get.return_value = [host]
+
+        syncer = Sync({"usermacro_sync": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_template_update_omits_template_link_type(self, mock_api, mock_zabbix_api):
         """Template unlink requests contain only fields accepted by host.update."""
         device = MockNetboxDevice(

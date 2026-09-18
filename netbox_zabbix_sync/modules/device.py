@@ -1226,6 +1226,33 @@ class PhysicalDevice:
         self._sync_discovered_macros(host)
         self._sync_discovered_tags(host)
 
+    @staticmethod
+    def _hostgroups_in_sync(current_groups, desired_groups):
+        """Compare host groups by their managed Zabbix IDs."""
+        return sorted(str(group["groupid"]) for group in current_groups) == sorted(
+            str(group["groupid"]) for group in desired_groups
+        )
+
+    @staticmethod
+    def _macros_in_sync(current_macros, desired_macros):
+        """Compare managed macro fields while ignoring Zabbix API metadata."""
+
+        def comparable(macro):
+            result = {
+                key: str(macro.get(key, "")) for key in ("macro", "type", "description")
+            }
+            if "value" in macro:
+                result["value"] = str(macro["value"])
+            return result
+
+        return sorted(
+            (comparable(macro) for macro in current_macros),
+            key=itemgetter("macro"),
+        ) == sorted(
+            (comparable(macro) for macro in desired_macros),
+            key=itemgetter("macro"),
+        )
+
     def set_interface_details(self):
         """
         Checks interface parameters from NetBox and
@@ -1712,9 +1739,7 @@ class PhysicalDevice:
             if str(self.zabbix.version).startswith(("6", "5")):
                 group_dictname = "groups"
             # Check if hostgroups match
-            if sorted(host[group_dictname], key=itemgetter("groupid")) == sorted(
-                self.group_ids, key=itemgetter("groupid")
-            ):
+            if self._hostgroups_in_sync(host[group_dictname], self.group_ids):
                 self.logger.debug("Host %s: Hostgroups in-sync.", self.name)
             else:
                 self.logger.info("Host %s: Hostgroups OUT of sync.", self.name)
@@ -1844,14 +1869,8 @@ class PhysicalDevice:
                 compare_macros = netbox_macros
                 update_macros = self.usermacros
 
-            # Sort all lists
-            def filter_with_macros(macro):
-                return macro["macro"]
-
-            host["macros"].sort(key=filter_with_macros)
-            compare_macros.sort(key=filter_with_macros)
             # Check if both lists are the same
-            if host["macros"] == compare_macros:
+            if self._macros_in_sync(host["macros"], compare_macros):
                 self.logger.debug("Host %s: Usermacros in-sync.", self.name)
             else:
                 self.logger.info("Host %s: Usermacros OUT of sync.", self.name)
