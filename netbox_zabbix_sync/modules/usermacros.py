@@ -243,17 +243,24 @@ class ZabbixUsermacros:
             "zabbix" in self.nb.config_context
             and "usermacros" in self.nb.config_context["zabbix"]
         ):
-            for macro, properties in self.nb.config_context["zabbix"][
-                "usermacros"
-            ].items():
-                expanded_properties = self._expand_config_context_properties(
-                    macro, properties
+            context_macros = self.nb.config_context["zabbix"]["usermacros"]
+            if not isinstance(context_macros, dict):
+                self.logger.warning(
+                    "Host %s: Config context 'zabbix.usermacros' must be a "
+                    "dictionary, got %s; skipping.",
+                    self.name,
+                    type(context_macros).__name__,
                 )
-                if expanded_properties is None:
-                    continue
-                m = self.render_macro(macro, expanded_properties)
-                if m:
-                    macros.append(m)
+            else:
+                for macro, properties in context_macros.items():
+                    expanded_properties = self._expand_config_context_properties(
+                        macro, properties
+                    )
+                    if expanded_properties is None:
+                        continue
+                    m = self.render_macro(macro, expanded_properties)
+                    if m:
+                        macros.append(m)
         data = {"macros": macros}
         self.logger.debug(
             "Host %s: Resolved macros: %s", self.name, sanatize_log_output(data)

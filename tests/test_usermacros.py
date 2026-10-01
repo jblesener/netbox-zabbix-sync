@@ -229,6 +229,21 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(result[0]["macro"], "{$TEST_MACRO}")
         self.assertEqual(result[0]["value"], "test_value")
 
+    def test_generate_skips_non_dict_config_context_usermacros(self):
+        config_context = {"zabbix": {"usermacros": [{"{$TEST_MACRO}": "test_value"}]}}
+        nb = DummyNB(config_context=config_context)
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(result, [])
+        self.logger.warning.assert_called_once_with(
+            "Host %s: Config context 'zabbix.usermacros' must be a "
+            "dictionary, got %s; skipping.",
+            "dummy",
+            "list",
+        )
+
     def test_generate_expands_config_context_string_value(self):
         config_context = {
             "zabbix": {"usermacros": {"{$VMWARE.URL}": "https://{netbox:name}/sdk"}}
