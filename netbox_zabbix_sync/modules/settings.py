@@ -48,12 +48,6 @@ DEFAULT_CONFIG = {
     "esxi_adopted_hostid_cf": "",
     "vmware_vm_adopted_hostid_cf": "",
     "sync_lld_hostgroups": False,
-    "lld_usermacro_overrides": [
-        "{$TOTAL_MEMORY}",
-        "{$DEV_ROLE}",
-        "{$NB_URL}",
-        "{$NB_ID}",
-    ],
     "full_proxy_sync": False,
     "zabbix_device_removal": ["Decommissioning", "Inventory"],
     "zabbix_device_disable": ["Offline", "Planned", "Staged", "Failed"],

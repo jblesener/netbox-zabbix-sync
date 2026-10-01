@@ -300,7 +300,6 @@ adopt_fqdn_normalization = False  # match FQDNs with short names during adoption
 esxi_adopted_hostid_cf = ""    # optional device CF for a vSphere LLD host ID
 vmware_vm_adopted_hostid_cf = ""  # optional VM CF for a VMware VM Discovery host ID
 sync_lld_hostgroups = False    # preserve all existing groups on LLD hosts
-lld_usermacro_overrides = ["{$TOTAL_MEMORY}", "{$DEV_ROLE}", "{$NB_URL}", "{$NB_ID}"]
 ```
 
 Behavior:
@@ -321,12 +320,12 @@ Behavior:
   uniquely name-matched, LLD-created VMware VM Discovery host in
   `vmware_vm_adopted_hostid_cf`. This VM-specific opt-in is independent of
   `adopt_scope`, which continues to control ordinary primary-host adoption.
-- The adopted vSphere host receives only the existing LLD-safe enrichment:
-  eligible `lld_usermacro_overrides` and NetBox tags. Its LLD-managed names,
-  templates, groups, interfaces, proxy, status, inventory, and cleanup
-  lifecycle are never changed. If the match is absent, ambiguous, or not
-  LLD-created, the dedicated host remains usable and the adopted host is not
-  linked.
+- The adopted vSphere host receives only LLD-safe enrichment: NetBox-managed
+  macros that do not conflict with automatic LLD macros, and NetBox tags. Its
+  LLD-managed names, templates, groups, interfaces, proxy, status, inventory,
+  and cleanup lifecycle are never changed. If the match is absent, ambiguous,
+  or not LLD-created, the dedicated host remains usable and the adopted host
+  is not linked.
 - NetBox validates platform manufacturer restrictions for every device update,
   including the custom-field update that records an adopted host ID. An ESXi
   platform assigned to hardware from multiple vendors must not be restricted to
@@ -345,14 +344,12 @@ Behavior:
   multiple hosts with the same short name, adoption is skipped for safety.
 - LLD-created hosts (including VMware-discovered VMs) retain discovery-owned
   fields: technical and visible names, LLD-linked templates, prototype groups,
-  automatic tags/macros, and scalar host settings. The macros named by
-  `lld_usermacro_overrides` are the exception: when NetBox defines one, the
-  syncer converts its matching automatic LLD macro to a manually managed macro
-  and synchronizes it from NetBox. The default list is `{$TOTAL_MEMORY}`,
-  `{$DEV_ROLE}`, `{$NB_URL}`, and `{$NB_ID}`; set it to `[]` to preserve all
-  LLD-owned macros. NetBox continues to reconcile manually linked templates,
-  tags, and macros without removing other discovery-owned entries. By default
-  it leaves every LLD hostgroup unchanged,
+  automatic tags/macros, and scalar host settings. If NetBox defines a macro
+  with the same name as an automatic LLD macro, the syncer preserves the
+  discovery-owned macro and skips the NetBox value; it never converts
+  automatic macros. NetBox continues to reconcile manually linked templates,
+  tags, and non-conflicting macros without removing other discovery-owned
+  entries. By default it leaves every LLD hostgroup unchanged,
   including manual groups; set `sync_lld_hostgroups = True` to restore manual
   hostgroup reconciliation while preserving prototype groups.
 - Azure VM hosts linked to `azure_vm_discovered_templates` (default:
