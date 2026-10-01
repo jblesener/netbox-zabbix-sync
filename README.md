@@ -225,7 +225,7 @@ Model each Azure subscription as a Tenant and set:
 
 ```
 * Type: Integer
-* Name: zabbix_hostid
+* Name: zabbix_hostid (or the field configured by azure_zabbix_hostid_cf)
 * Required: False
 * Default: null
 * Object: tenancy > tenant
@@ -253,9 +253,13 @@ principal credentials:
 
 ```python
 sync_azure_subscriptions = True
+azure_zabbix_hostid_cf = "zabbix_hostid"  # Optional; default shown
 azure_app_id_vault = "secret/azure:app_id"
 azure_password_vault = "secret/azure:password"
 ```
+
+Set `azure_zabbix_hostid_cf` to the name of a different integer custom field
+on Tenants to read and store the Azure subscription's Zabbix host ID there.
 
 Each synced Tenant is created as a Zabbix host named after the Tenant,
 assigned to `Azure/Subscriptions`, linked to `Azure by HTTP`, and given
