@@ -250,6 +250,10 @@ tag_value = "name"
 cleanup_deleted_hosts = False
 cleanup_instance_id = "default"
 
+# Clear a linked NetBox host ID only after Zabbix successfully confirms that
+# the host no longer exists. API errors or unexpected responses keep the ID.
+clear_stale_zabbix_hostids = False
+
 # device tag_map to map NetBox fields to host tags.
 device_tag_map = {"site/name": "site",
                   "rack/name": "rack",

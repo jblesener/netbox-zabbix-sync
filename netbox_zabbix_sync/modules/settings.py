@@ -101,6 +101,7 @@ DEFAULT_CONFIG = {
     # instance ID namespaces ownership when several deployments use Zabbix.
     "cleanup_deleted_hosts": False,
     "cleanup_instance_id": "default",
+    "clear_stale_zabbix_hostids": False,
     "device_tag_map": {
         "site/name": "site",
         "rack/name": "rack",

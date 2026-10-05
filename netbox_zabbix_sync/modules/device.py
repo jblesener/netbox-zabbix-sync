@@ -1579,33 +1579,54 @@ class PhysicalDevice:
         full_sync=True,
         cleanup_ownership=False,
         hostgroup_resolver=None,
-    ):
+    ) -> bool:
         """
         Checks if Zabbix object is still valid with NetBox parameters.
         """
-        if full_sync:
-            # LLD hosts still need their desired manual templates prepared, but
-            # their hostgroup work must wait until discovery status is known.
+        clear_stale_hostids = bool(self.config.get("clear_stale_zabbix_hostids", False))
+        if full_sync and not clear_stale_hostids:
+            # Preserve the existing default ordering; when stale-link recovery
+            # is enabled, verify the linked host before resolving dependencies.
             self.zbx_template_prepper(templates)
         # Get host object from Zabbix
-        host = self.zabbix.host.get(
-            filter={"hostid": self.zabbix_id},
-            selectInterfaces=["type", "ip", "port", "details", "interfaceid"],
-            selectGroups=["groupid", "flags"],
-            selectHostGroups=["groupid", "flags"],
-            selectHostDiscovery=["parent_hostid"],
-            selectParentTemplates=["templateid", "link_type"],
-            selectInventory=list(self._inventory_map().values()),
-            selectMacros=[
-                "hostmacroid",
-                "macro",
-                "value",
-                "type",
-                "description",
-                "automatic",
-            ],
-            selectTags=["tag", "value", "automatic"],
-        )
+        try:
+            host = self.zabbix.host.get(
+                filter={"hostid": self.zabbix_id},
+                selectInterfaces=["type", "ip", "port", "details", "interfaceid"],
+                selectGroups=["groupid", "flags"],
+                selectHostGroups=["groupid", "flags"],
+                selectHostDiscovery=["parent_hostid"],
+                selectParentTemplates=["templateid", "link_type"],
+                selectInventory=list(self._inventory_map().values()),
+                selectMacros=[
+                    "hostmacroid",
+                    "macro",
+                    "value",
+                    "type",
+                    "description",
+                    "automatic",
+                ],
+                selectTags=["tag", "value", "automatic"],
+            )
+        except APIRequestError as error:
+            if not clear_stale_hostids:
+                raise
+            message = (
+                f"Host {self.name}: Unable to verify linked Zabbix host ID "
+                f"{self.zabbix_id}. Zabbix returned {error}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from error
+        if clear_stale_hostids and (
+            not isinstance(host, list)
+            or any(not isinstance(host_record, Mapping) for host_record in host)
+        ):
+            message = (
+                f"Host {self.name}: Zabbix returned an invalid response while "
+                f"verifying host ID {self.zabbix_id}; retaining the NetBox link."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message)
         if len(host) > 1:
             e = (
                 f"Got {len(host)} results for Zabbix hosts "
@@ -1614,6 +1635,18 @@ class PhysicalDevice:
             self.logger.error(e)
             raise SyncInventoryError(e)
         if len(host) == 0:
+            if clear_stale_hostids:
+                stale_hostid = self.zabbix_id
+                self._zeroize_cf()
+                self.zabbix_id = None
+                self.logger.info(
+                    "Host %s: Zabbix host ID %s no longer exists. "
+                    "Cleared NetBox custom field '%s'.",
+                    self.name,
+                    stale_hostid,
+                    self.device_cf,
+                )
+                return False
             e = (
                 f"Host {self.name}: No Zabbix host found. "
                 f"This is likely the result of a deleted Zabbix host "
@@ -1621,6 +1654,10 @@ class PhysicalDevice:
             )
             self.logger.error(e)
             raise SyncInventoryError(e)
+        if full_sync and clear_stale_hostids:
+            # LLD hosts still need their desired manual templates prepared, but
+            # their hostgroup work must wait until discovery status is known.
+            self.zbx_template_prepper(templates)
         host = host[0]
         discovered_host = self._is_discovered_host(host)
         sync_lld_hostgroups = bool(self.config.get("sync_lld_hostgroups", False))
@@ -1875,7 +1912,7 @@ class PhysicalDevice:
                     self.logger.debug(
                         "Host %s: Interface-free configuration in-sync.", self.name
                     )
-                return
+                return True
             # If only 1 interface has been found
             if len(host["interfaces"]) == 1:
                 updates = {}
@@ -1945,6 +1982,7 @@ class PhysicalDevice:
                 )
                 self.logger.error(err_msg)
                 raise SyncInventoryError(err_msg)
+        return True
 
     def create_journal_entry(self, severity, message):
         """

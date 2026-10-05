@@ -704,6 +704,24 @@ tag_sync = True
 tag_lower = True
 ```
 
+### Clear stale Zabbix host IDs
+
+By default, a NetBox host ID that points to a deleted Zabbix host is left
+unchanged, and the object is not automatically recreated. To opt in to clearing
+stale links, enable `clear_stale_zabbix_hostids`:
+
+```python
+clear_stale_zabbix_hostids = True
+```
+
+The sync clears the configured primary host-ID custom field for devices, VMs,
+ONTAP clusters, OOB imports, and Azure subscription Tenants only after a
+successful Zabbix host lookup returns no matches. It then resumes normal
+adoption or creation during the same run. A Zabbix API error or unexpected
+response preserves the NetBox field and skips that object's sync; these
+failures are never treated as confirmation that a host is absent. Auxiliary
+LLD/adopted-host ID fields are not checked by this option.
+
 ### Cleanup hosts whose NetBox source was deleted
 
 By default, the sync never removes a host merely because its NetBox device or

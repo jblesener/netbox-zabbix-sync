@@ -529,30 +529,46 @@ class Sync:
             return
         if vm.status in self.config["zabbix_device_disable"]:
             vm.zabbix_state = 1
-        adopted = vm.adopt_existing_zabbix_host()
-        cleanup_ownership = bool(
-            self.config.get("cleanup_deleted_hosts")
-            and (linked_before_run or not adopted)
-        )
-        full_sync = not (
-            adopted
-            and (
-                vm.adopted_azure_discovered_host
-                or str(self.config.get("adopt_enrich_mode", "full")).lower()
-                == "metadata_only"
-            )
-        )
+        host_consistent = False
         if vm.zabbix_id:
-            vm.consistency_check(
+            host_consistent = vm.consistency_check(
                 zabbix_groups,
                 zabbix_templates,
                 zabbix_proxy_list,
                 self.config["full_proxy_sync"],
                 self.config["create_hostgroups"],
-                full_sync=full_sync,
-                cleanup_ownership=cleanup_ownership,
+                full_sync=True,
+                cleanup_ownership=bool(
+                    self.config.get("cleanup_deleted_hosts") and linked_before_run
+                ),
                 hostgroup_resolver=resolve_hostgroups,
             )
+        if not host_consistent:
+            adopted = vm.adopt_existing_zabbix_host()
+            cleanup_ownership = bool(
+                self.config.get("cleanup_deleted_hosts")
+                and (linked_before_run or not adopted)
+            )
+            full_sync = not (
+                adopted
+                and (
+                    vm.adopted_azure_discovered_host
+                    or str(self.config.get("adopt_enrich_mode", "full")).lower()
+                    == "metadata_only"
+                )
+            )
+            if vm.zabbix_id:
+                host_consistent = vm.consistency_check(
+                    zabbix_groups,
+                    zabbix_templates,
+                    zabbix_proxy_list,
+                    self.config["full_proxy_sync"],
+                    self.config["create_hostgroups"],
+                    full_sync=full_sync,
+                    cleanup_ownership=cleanup_ownership,
+                    hostgroup_resolver=resolve_hostgroups,
+                )
+        if host_consistent:
             vm.sync_adopted_lld_host()
             return
         if not resolve_hostgroups():
@@ -675,30 +691,46 @@ class Sync:
         # Check if the device is in the disabled state
         if device.status in device_config["zabbix_device_disable"]:
             device.zabbix_state = 1
-        adopted = device.adopt_existing_zabbix_host()
-        cleanup_ownership = bool(
-            device_config.get("cleanup_deleted_hosts")
-            and (linked_before_run or not adopted)
-        )
-        full_sync = True
-        if adopted and (
-            device.adopted_azure_discovered_host
-            or str(device_config.get("adopt_enrich_mode", "full")).lower()
-            == "metadata_only"
-        ):
-            full_sync = False
-        # Check if device is already in Zabbix
+        host_consistent = False
         if device.zabbix_id:
-            device.consistency_check(
+            host_consistent = device.consistency_check(
                 zabbix_groups,
                 zabbix_templates,
                 zabbix_proxy_list,
                 device_config["full_proxy_sync"],
                 device_config["create_hostgroups"],
-                full_sync=full_sync,
-                cleanup_ownership=cleanup_ownership,
+                full_sync=True,
+                cleanup_ownership=bool(
+                    device_config.get("cleanup_deleted_hosts") and linked_before_run
+                ),
                 hostgroup_resolver=resolve_hostgroups,
             )
+        if not host_consistent:
+            adopted = device.adopt_existing_zabbix_host()
+            cleanup_ownership = bool(
+                device_config.get("cleanup_deleted_hosts")
+                and (linked_before_run or not adopted)
+            )
+            full_sync = not (
+                adopted
+                and (
+                    device.adopted_azure_discovered_host
+                    or str(device_config.get("adopt_enrich_mode", "full")).lower()
+                    == "metadata_only"
+                )
+            )
+            if device.zabbix_id:
+                host_consistent = device.consistency_check(
+                    zabbix_groups,
+                    zabbix_templates,
+                    zabbix_proxy_list,
+                    device_config["full_proxy_sync"],
+                    device_config["create_hostgroups"],
+                    full_sync=full_sync,
+                    cleanup_ownership=cleanup_ownership,
+                    hostgroup_resolver=resolve_hostgroups,
+                )
+        if host_consistent:
             device.sync_adopted_esxi_lld_host()
             return True
         if not resolve_hostgroups():
@@ -741,14 +773,27 @@ class Sync:
         if not azure_subscription.validate():
             return True
         azure_subscription.set_usermacros()
+        had_linked_hostid = bool(azure_subscription.zabbix_id)
         adopted = azure_subscription.adopt_existing_zabbix_host()
+        host_consistent = False
         if azure_subscription.zabbix_id:
-            azure_subscription.consistency_check(
+            host_consistent = azure_subscription.consistency_check(
                 zabbix_groups,
                 zabbix_templates,
                 self.config["create_hostgroups"],
             )
+        if not host_consistent and (had_linked_hostid or adopted):
+            adopted = azure_subscription.adopt_existing_zabbix_host()
+            if azure_subscription.zabbix_id:
+                host_consistent = azure_subscription.consistency_check(
+                    zabbix_groups,
+                    zabbix_templates,
+                    self.config["create_hostgroups"],
+                )
+        if host_consistent:
             return True
+        if not azure_subscription.zabbix_id:
+            adopted = False
         if not adopted:
             azure_subscription.create_in_zabbix(
                 zabbix_groups,

@@ -3,12 +3,18 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from zabbix_utils import APIRequestError
+
 from netbox_zabbix_sync.modules.device import (
     CLEANUP_INSTANCE_TAG,
     CLEANUP_SOURCE_TAG,
     PhysicalDevice,
 )
-from netbox_zabbix_sync.modules.exceptions import TemplateError
+from netbox_zabbix_sync.modules.exceptions import (
+    SyncExternalError,
+    SyncInventoryError,
+    TemplateError,
+)
 
 
 class TestPhysicalDevice(unittest.TestCase):
@@ -68,6 +74,134 @@ class TestPhysicalDevice(unittest.TestCase):
         self.assertEqual(self.device.status, "Active")
         self.assertEqual(self.device.ip, "192.168.1.1")
         self.assertEqual(self.device.cidr, "192.168.1.1/24")
+
+    def test_consistency_check_clears_a_confirmed_missing_host_id(self):
+        self.mock_nb_device.custom_fields["zabbix_hostid"] = "456"
+        self.device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={
+                "device_cf": "zabbix_hostid",
+                "device_inventory_map": {},
+                "clear_stale_zabbix_hostids": True,
+            },
+        )
+        self.mock_zabbix.host.get.return_value = []
+
+        found = self.device.consistency_check([], [], [], False, False)
+
+        self.assertFalse(found)
+        self.assertIsNone(self.device.zabbix_id)
+        self.assertIsNone(self.mock_nb_device.custom_fields["zabbix_hostid"])
+        self.mock_nb_device.save.assert_called_once()
+
+    def test_consistency_check_preserves_missing_host_id_by_default(self):
+        self.mock_nb_device.custom_fields["zabbix_hostid"] = "456"
+        self.device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={"device_cf": "zabbix_hostid", "device_inventory_map": {}},
+        )
+        self.mock_zabbix.host.get.return_value = []
+
+        with self.assertRaises(SyncInventoryError):
+            self.device.consistency_check([], [], [], False, False)
+
+        self.assertEqual(self.device.zabbix_id, "456")
+        self.assertEqual(self.mock_nb_device.custom_fields["zabbix_hostid"], "456")
+        self.mock_nb_device.save.assert_not_called()
+
+    def test_consistency_check_keeps_link_when_zabbix_lookup_fails(self):
+        self.mock_nb_device.custom_fields["zabbix_hostid"] = "456"
+        self.device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={
+                "device_cf": "zabbix_hostid",
+                "device_inventory_map": {},
+                "clear_stale_zabbix_hostids": True,
+            },
+        )
+        self.mock_zabbix.host.get.side_effect = APIRequestError("temporary outage")
+
+        with self.assertRaises(SyncExternalError):
+            self.device.consistency_check([], [], [], False, False)
+
+        self.assertEqual(self.device.zabbix_id, "456")
+        self.assertEqual(self.mock_nb_device.custom_fields["zabbix_hostid"], "456")
+        self.mock_nb_device.save.assert_not_called()
+
+    def test_consistency_check_keeps_link_on_invalid_zabbix_response(self):
+        self.mock_nb_device.custom_fields["zabbix_hostid"] = "456"
+        self.device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={
+                "device_cf": "zabbix_hostid",
+                "device_inventory_map": {},
+                "clear_stale_zabbix_hostids": True,
+            },
+        )
+        self.mock_zabbix.host.get.return_value = None
+
+        with self.assertRaises(SyncExternalError):
+            self.device.consistency_check([], [], [], False, False)
+
+        self.assertEqual(self.device.zabbix_id, "456")
+        self.assertEqual(self.mock_nb_device.custom_fields["zabbix_hostid"], "456")
+        self.mock_nb_device.save.assert_not_called()
+
+    def test_consistency_check_keeps_existing_host_id(self):
+        self.mock_nb_device.custom_fields["zabbix_hostid"] = "456"
+        self.device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={
+                "device_cf": "zabbix_hostid",
+                "device_inventory_map": {},
+                "clear_stale_zabbix_hostids": True,
+                "inventory_mode": "disabled",
+                "inventory_sync": False,
+                "tls_sync": False,
+                "usermacro_sync": False,
+                "tag_sync": False,
+            },
+        )
+        self.mock_zabbix.host.get.return_value = [
+            {
+                "flags": "0",
+                "inventory_mode": "-1",
+                "inventory": {},
+                "parentTemplates": [],
+                "groups": [],
+                "hostgroups": [],
+                "interfaces": [],
+                "macros": [],
+                "tags": [],
+            }
+        ]
+
+        found = self.device.consistency_check([], [], [], False, False, full_sync=False)
+
+        self.assertTrue(found)
+        self.assertEqual(self.device.zabbix_id, "456")
+        self.assertEqual(self.mock_nb_device.custom_fields["zabbix_hostid"], "456")
+        self.mock_nb_device.save.assert_not_called()
 
     def test_cleanup_ownership_tags_are_available_without_tag_sync(self):
         self.device.config["cleanup_deleted_hosts"] = True

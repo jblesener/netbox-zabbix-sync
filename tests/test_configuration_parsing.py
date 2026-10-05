@@ -56,6 +56,7 @@ def test_load_config_defaults():
         assert config["sync_lld_hostgroups"] is False
         assert config["cleanup_deleted_hosts"] is False
         assert config["cleanup_instance_id"] == "default"
+        assert config["clear_stale_zabbix_hostids"] is False
 
 
 def test_load_config_file():
@@ -93,6 +94,8 @@ def test_load_env_variables():
             return "false"
         if key == "cleanup_instance_id":
             return "deployment-a"
+        if key == "clear_stale_zabbix_hostids":
+            return "true"
         return None
 
     with (
@@ -110,6 +113,7 @@ def test_load_env_variables():
         assert config["create_journal"] is True
         assert config["cleanup_deleted_hosts"] is False
         assert config["cleanup_instance_id"] == "deployment-a"
+        assert config["clear_stale_zabbix_hostids"] is True
         # Unchanged values should remain as defaults
         assert config["templates_config_context"] is False
 
@@ -209,6 +213,14 @@ def test_cleanup_options_can_be_overridden_on_the_cli():
 
     assert result["cleanup_deleted_hosts"] is True
     assert result["cleanup_instance_id"] == "deployment-a"
+
+
+def test_stale_hostid_cleanup_can_be_overridden_on_the_cli():
+    config = DEFAULT_CONFIG.copy()
+
+    result = _apply_cli_overrides(config, Namespace(clear_stale_zabbix_hostids=True))
+
+    assert result["clear_stale_zabbix_hostids"] is True
 
 
 def test_lld_hostgroup_sync_can_be_overridden_on_the_cli():

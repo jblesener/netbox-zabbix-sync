@@ -60,6 +60,10 @@ _BOOL_ARGS = [
         "cleanup_deleted_hosts",
         "Delete this deployment's marked Zabbix hosts when their NetBox source no longer exists.",
     ),
+    (
+        "clear_stale_zabbix_hostids",
+        "Clear NetBox host IDs after Zabbix confirms the linked host no longer exists.",
+    ),
 ]
 
 # String settings that can be set via --option VALUE

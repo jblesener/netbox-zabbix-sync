@@ -1,5 +1,6 @@
 """Azure subscription sync support."""
 
+from collections.abc import Mapping
 from copy import deepcopy
 from logging import getLogger
 from operator import itemgetter
@@ -334,17 +335,39 @@ class AzureSubscription:
             "Host %s: updated with data %s.", self.name, sanatize_log_output(kwargs)
         )
 
-    def consistency_check(self, groups, templates, create_hostgroups):
+    def consistency_check(self, groups, templates, create_hostgroups) -> bool:
         """Reconcile an existing Zabbix host with NetBox Tenant data."""
-        self._prepare_zabbix_references(groups, templates, create_hostgroups)
-        host = self.zabbix.host.get(
-            filter={"hostid": self.zabbix_id},
-            selectInterfaces=["interfaceid"],
-            selectGroups=["groupid"],
-            selectHostGroups=["groupid"],
-            selectParentTemplates=["templateid"],
-            selectMacros=["macro", "value", "type", "description"],
-        )
+        clear_stale_hostids = bool(self.config.get("clear_stale_zabbix_hostids", False))
+        if not clear_stale_hostids:
+            self._prepare_zabbix_references(groups, templates, create_hostgroups)
+        try:
+            host = self.zabbix.host.get(
+                filter={"hostid": self.zabbix_id},
+                selectInterfaces=["interfaceid"],
+                selectGroups=["groupid"],
+                selectHostGroups=["groupid"],
+                selectParentTemplates=["templateid"],
+                selectMacros=["macro", "value", "type", "description"],
+            )
+        except APIRequestError as error:
+            if not clear_stale_hostids:
+                raise
+            message = (
+                f"Host {self.name}: Unable to verify linked Zabbix host ID "
+                f"{self.zabbix_id}. Zabbix returned {error}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from error
+        if clear_stale_hostids and (
+            not isinstance(host, list)
+            or any(not isinstance(host_record, Mapping) for host_record in host)
+        ):
+            message = (
+                f"Host {self.name}: Zabbix returned an invalid response while "
+                f"verifying host ID {self.zabbix_id}; retaining the NetBox link."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message)
         if len(host) > 1:
             message = (
                 f"Got {len(host)} results for Zabbix hosts "
@@ -353,6 +376,20 @@ class AzureSubscription:
             self.logger.error(message)
             raise SyncInventoryError(message)
         if len(host) == 0:
+            if clear_stale_hostids:
+                stale_hostid = self.zabbix_id
+                hostid_cf = self.config["azure_zabbix_hostid_cf"]
+                self.nb.custom_fields[hostid_cf] = None
+                self.nb.save()
+                self.zabbix_id = None
+                self.logger.info(
+                    "Host %s: Zabbix host ID %s no longer exists. "
+                    "Cleared NetBox custom field '%s'.",
+                    self.name,
+                    stale_hostid,
+                    hostid_cf,
+                )
+                return False
             message = (
                 f"Host {self.name}: No Zabbix host found. "
                 "This is likely the result of a deleted Zabbix host "
@@ -360,6 +397,8 @@ class AzureSubscription:
             )
             self.logger.error(message)
             raise SyncInventoryError(message)
+        if clear_stale_hostids:
+            self._prepare_zabbix_references(groups, templates, create_hostgroups)
         host = host[0]
         if host["host"] != self.name:
             self.logger.info("Host %s: Hostname OUT of sync.", self.name)
@@ -390,6 +429,7 @@ class AzureSubscription:
         if not self._macros_in_sync(host["macros"]):
             self.logger.info("Host %s: Usermacros OUT of sync.", self.name)
             self.update_zabbix_host(macros=self.macros)
+        return True
 
     def _macros_in_sync(self, zabbix_macros):
         """Compare desired macros with Zabbix macros."""

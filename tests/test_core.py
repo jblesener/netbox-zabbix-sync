@@ -880,6 +880,126 @@ class TestSyncAzureSubscriptions(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_missing_azure_host_id_is_cleared_and_recreated(
+        self, mock_api, mock_zabbix_api
+    ):
+        tenant = MockNetboxTenant(zabbix_hostid=42)
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        with patch.object(tenant, "save") as save:
+            syncer = Sync(self._sync_config(clear_stale_zabbix_hostids=True))
+            syncer.connect(
+                "http://netbox.local",
+                "nb_token",
+                "http://zabbix.local",
+                "user",
+                "pass",
+                None,
+            )
+            syncer.start()
+
+        mock_zabbix.host.delete.assert_not_called()
+        mock_zabbix.host.create.assert_called_once()
+        self.assertEqual(tenant.custom_fields["zabbix_hostid"], 30)
+        self.assertEqual(save.call_count, 2)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_azure_lookup_error_preserves_host_id(self, mock_api, mock_zabbix_api):
+        tenant = MockNetboxTenant(zabbix_hostid=42)
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.side_effect = APIRequestError("temporary outage")
+
+        syncer = Sync(self._sync_config(clear_stale_zabbix_hostids=True))
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_not_called()
+        self.assertEqual(tenant.custom_fields["zabbix_hostid"], 42)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_invalid_azure_host_lookup_preserves_host_id(
+        self, mock_api, mock_zabbix_api
+    ):
+        tenant = MockNetboxTenant(zabbix_hostid=42)
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.return_value = None
+
+        syncer = Sync(self._sync_config(clear_stale_zabbix_hostids=True))
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.create.assert_not_called()
+        self.assertEqual(tenant.custom_fields["zabbix_hostid"], 42)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_stale_azure_host_id_can_adopt_replacement_in_same_run(
+        self, mock_api, mock_zabbix_api
+    ):
+        tenant = MockNetboxTenant(zabbix_hostid=42)
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        replacement_host = {
+            "hostid": "88",
+            "host": tenant.name,
+            "name": tenant.name,
+            "parentTemplates": [{"templateid": "20"}],
+            "hostgroups": [{"groupid": "10"}],
+            "groups": [{"groupid": "10"}],
+            "interfaces": [],
+            "macros": [],
+        }
+
+        def host_get(**kwargs):
+            host_filter = kwargs.get("filter", {})
+            if host_filter == {"hostid": 42}:
+                return []
+            if host_filter == {"hostid": 88}:
+                return [replacement_host]
+            if host_filter in ({"host": tenant.name}, {"name": tenant.name}):
+                return [{"hostid": "88", "host": tenant.name, "name": tenant.name}]
+            return []
+
+        mock_zabbix.host.get.side_effect = host_get
+
+        with patch.object(tenant, "save") as save:
+            syncer = Sync(self._sync_config(clear_stale_zabbix_hostids=True))
+            syncer.connect(
+                "http://netbox.local",
+                "nb_token",
+                "http://zabbix.local",
+                "user",
+                "pass",
+                None,
+            )
+            syncer.start()
+
+        mock_zabbix.host.create.assert_not_called()
+        mock_zabbix.host.delete.assert_not_called()
+        self.assertEqual(tenant.custom_fields["zabbix_hostid"], 88)
+        self.assertEqual(save.call_count, 2)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_sync_azure_subscription_skips_missing_required_data(
         self, mock_api, mock_zabbix_api
     ):
@@ -1585,6 +1705,32 @@ class TestDeviceStatusHandling(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_missing_device_host_id_is_cleared_and_recreated(
+        self, mock_api, mock_zabbix_api
+    ):
+        device = MockNetboxDevice(
+            name="test-device", status_label="Active", zabbix_hostid=42
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync({"clear_stale_zabbix_hostids": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.delete.assert_not_called()
+        mock_zabbix.host.create.assert_called_once()
+        self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_api_metadata_does_not_trigger_group_or_macro_updates(
         self, mock_api, mock_zabbix_api
     ):
@@ -1986,6 +2132,30 @@ class TestVMStatusHandling(unittest.TestCase):
 
         mock_zabbix.host.create.assert_not_called()
         mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_missing_vm_host_id_is_cleared_and_recreated(
+        self, mock_api, mock_zabbix_api
+    ):
+        vm = MockNetboxVM(name="test-vm", status_label="Active", zabbix_hostid=42)
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync({**self._SYNC_CFG, "clear_stale_zabbix_hostids": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.delete.assert_not_called()
+        mock_zabbix.host.create.assert_called_once()
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
