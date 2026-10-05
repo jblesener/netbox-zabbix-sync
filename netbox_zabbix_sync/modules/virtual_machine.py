@@ -1,12 +1,7 @@
 """Module that hosts all functions for virtual machine processing"""
 
 from netbox_zabbix_sync.modules.device import PhysicalDevice
-from netbox_zabbix_sync.modules.exceptions import (
-    InterfaceConfigError,
-    SyncInventoryError,
-    TemplateError,
-)
-from netbox_zabbix_sync.modules.interface import ZabbixInterface
+from netbox_zabbix_sync.modules.exceptions import TemplateError
 
 
 class VirtualMachine(PhysicalDevice):
@@ -49,22 +44,6 @@ class VirtualMachine(PhysicalDevice):
         Overwrites device function to select an agent interface type by default
         Agent type interfaces are more likely to be used with VMs then SNMP
         """
-        if not self.ip:
-            return []
-        zabbix_snmp_interface_type = 2
-        try:
-            # Initiate interface class
-            interface = ZabbixInterface(self.nb.config_context, self.ip)
-            # Check if NetBox has device context.
-            # If not fall back to old config.
-            if interface.get_context():
-                # If device is SNMP type, add aditional information.
-                if interface.interface["type"] == zabbix_snmp_interface_type:
-                    interface.set_snmp()
-            else:
-                interface.set_default_agent()
-            return [interface.interface]
-        except InterfaceConfigError as e:
-            message = f"{self.name}: {e}"
-            self.logger.warning(message)
-            raise SyncInventoryError(message) from e
+        return self._build_interface_details(
+            default_type=1, include_primary=bool(self.ip)
+        )

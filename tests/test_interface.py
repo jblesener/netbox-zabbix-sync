@@ -238,3 +238,143 @@ class TestZabbixInterface(unittest.TestCase):
         # Should use default community string
         details = cast(dict[str, str], interface.interface["details"])
         self.assertEqual(details["community"], "{$SNMP_COMMUNITY}")
+
+    def test_builds_additional_agent_interface_for_snmp_host(self):
+        """The primary SNMP interface and an additional agent interface are built."""
+        context = {
+            "zabbix": {
+                "interface_type": 2,
+                "snmp": {"version": 2, "community": "public"},
+                "additional_interfaces": [{"interface_type": 1}],
+            }
+        }
+
+        interfaces = ZabbixInterface.build_interfaces(
+            context, self.test_ip, default_type=2
+        )
+
+        self.assertEqual(
+            interfaces,
+            [
+                {
+                    "main": "1",
+                    "useip": "1",
+                    "dns": "",
+                    "ip": self.test_ip,
+                    "type": 2,
+                    "port": "161",
+                    "details": {
+                        "bulk": "1",
+                        "version": "2",
+                        "community": "public",
+                    },
+                },
+                {
+                    "main": "1",
+                    "useip": "1",
+                    "dns": "",
+                    "ip": self.test_ip,
+                    "type": 1,
+                    "port": "10050",
+                },
+            ],
+        )
+
+    def test_additional_interfaces_default_main_once_per_type(self):
+        """Only the first interface of each type defaults to main."""
+        context = {
+            "zabbix": {
+                "interface_type": 1,
+                "additional_interfaces": [
+                    {"interface_type": 1, "interface_port": 10051},
+                    {"interface_type": 2, "snmp": {"version": 2}},
+                ],
+            }
+        }
+
+        interfaces = ZabbixInterface.build_interfaces(
+            context, self.test_ip, default_type=2
+        )
+
+        self.assertEqual(
+            [interface["main"] for interface in interfaces], ["1", "0", "1"]
+        )
+        self.assertEqual([interface["type"] for interface in interfaces], [1, 1, 2])
+
+    def test_additional_interface_can_use_dns_without_primary_ip(self):
+        """Explicitly addressed additions are available to IP-less VMs."""
+        context = {
+            "zabbix": {
+                "additional_interfaces": [
+                    {"interface_type": 1, "ip": "192.0.2.8"},
+                    {
+                        "interface_type": 1,
+                        "dns": "agent.example.net",
+                        "useip": 0,
+                        "interface_port": 10051,
+                    },
+                ]
+            }
+        }
+
+        interfaces = ZabbixInterface.build_interfaces(
+            context, None, default_type=1, include_primary=False
+        )
+
+        self.assertEqual([interface["main"] for interface in interfaces], ["1", "0"])
+        self.assertEqual(interfaces[0]["ip"], "192.0.2.8")
+        self.assertEqual(interfaces[1]["ip"], "")
+        self.assertEqual(interfaces[1]["dns"], "agent.example.net")
+        self.assertEqual(interfaces[1]["useip"], "0")
+        self.assertEqual(interfaces[1]["port"], "10051")
+
+    def test_additional_interface_does_not_mutate_snmp_context(self):
+        """SNMP details are read without consuming keys from config context."""
+        context = {
+            "zabbix": {
+                "interface_type": 2,
+                "snmp": {"version": 2, "community": "public", "bulk": 0},
+                "additional_interfaces": [
+                    {"interface_type": 2, "snmp": {"version": 2}}
+                ],
+            }
+        }
+        original = {
+            "zabbix": {
+                "interface_type": 2,
+                "snmp": {"version": 2, "community": "public", "bulk": 0},
+                "additional_interfaces": [
+                    {"interface_type": 2, "snmp": {"version": 2}}
+                ],
+            }
+        }
+
+        ZabbixInterface.build_interfaces(context, self.test_ip, default_type=2)
+
+        self.assertEqual(context, original)
+
+    def test_rejects_malformed_additional_interfaces(self):
+        """Invalid additional interface definitions fail with a config error."""
+        invalid_contexts = [
+            {"zabbix": {"additional_interfaces": {}}},
+            {"zabbix": {"additional_interfaces": [{}]}},
+            {"zabbix": {"additional_interfaces": [{"interface_type": 99}]}},
+            {
+                "zabbix": {
+                    "additional_interfaces": [
+                        {"interface_type": 1, "interface_port": None}
+                    ]
+                }
+            },
+            {"zabbix": {"additional_interfaces": [{"interface_type": 1, "useip": 0}]}},
+            {
+                "zabbix": {
+                    "interface_type": 1,
+                    "additional_interfaces": [{"interface_type": 1, "main": 1}],
+                }
+            },
+        ]
+
+        for context in invalid_contexts:
+            with self.subTest(context=context), self.assertRaises(InterfaceConfigError):
+                ZabbixInterface.build_interfaces(context, self.test_ip, default_type=2)

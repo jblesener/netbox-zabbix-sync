@@ -11,6 +11,8 @@ from zabbix_utils import APIRequestError
 from netbox_zabbix_sync.modules.core import Sync, UnsyncedSummary, logger
 from netbox_zabbix_sync.modules.exceptions import SyncError
 
+SNMP_INTERFACE_TYPE = 2
+
 
 class MockListObject:
     def __repr__(self):
@@ -1442,6 +1444,7 @@ class TestDeviceHandeling(unittest.TestCase):
                         "templates": ["OobTemplate"],
                         "interface_type": 2,
                         "snmp": {"version": 2, "community": "public"},
+                        "additional_interfaces": [{"interface_type": 1}],
                     },
                 }
             },
@@ -1480,6 +1483,9 @@ class TestDeviceHandeling(unittest.TestCase):
         self.assertEqual(
             create_calls[1].kwargs["interfaces"][0]["details"]["community"], "public"
         )
+        self.assertEqual(len(create_calls[1].kwargs["interfaces"]), 2)
+        self.assertEqual(create_calls[1].kwargs["interfaces"][1]["type"], 1)
+        self.assertEqual(create_calls[1].kwargs["interfaces"][1]["ip"], "10.0.0.10")
         self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
         self.assertEqual(device.custom_fields["zabbix_oob_hostid"], 1)
 
@@ -1632,9 +1638,22 @@ class TestDeviceStatusHandling(unittest.TestCase):
                 "hostgroups": [{"groupid": "1"}],
                 "groups": [{"groupid": "1"}],
                 "status": status,
-                # Single empty-dict interface: len==1 avoids SyncInventoryError,
-                # empty keys prevent any spurious interface-update calls.
-                "interfaces": [{}],
+                "interfaces": [
+                    {
+                        "interfaceid": "1",
+                        "main": "1",
+                        "useip": "1",
+                        "dns": "",
+                        "ip": "192.168.1.1",
+                        "type": "2",
+                        "port": "161",
+                        "details": {
+                            "version": "2",
+                            "community": "{$SNMP_COMMUNITY}",
+                            "bulk": "1",
+                        },
+                    }
+                ],
                 "inventory_mode": "-1",
                 "inventory": {},
                 "macros": [],
@@ -1674,6 +1693,44 @@ class TestDeviceStatusHandling(unittest.TestCase):
         self.assertEqual(create_kwargs["host"], "test-device")
         self.assertEqual(create_kwargs["status"], 0)
 
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_device_creation_includes_additional_interface(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A primary SNMP interface and configured agent addition are both created."""
+        device = MockNetboxDevice(
+            name="linux-host",
+            status_label="Active",
+            zabbix_hostid=None,
+            config_context={
+                "zabbix": {
+                    "interface_type": 2,
+                    "snmp": {"version": 2, "community": "public"},
+                    "additional_interfaces": [{"interface_type": 1}],
+                }
+            },
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync()
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        interfaces = mock_zabbix.host.create.call_args.kwargs["interfaces"]
+        self.assertEqual([interface["type"] for interface in interfaces], [2, 1])
+        self.assertEqual([interface["main"] for interface in interfaces], ["1", "1"])
+        self.assertEqual(interfaces[0]["details"]["community"], "public")
+        self.assertEqual(interfaces[1]["ip"], "192.168.1.1")
+
     # ------------------------------------------------------------------
     # Scenario 2: Active device, already in Zabbix → consistency check,
     #             Zabbix status matches → no updates
@@ -1687,7 +1744,9 @@ class TestDeviceStatusHandling(unittest.TestCase):
         )
         self._setup_netbox_mock(mock_api, devices=[device])
         mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
-        mock_zabbix.host.get.return_value = self._make_zabbix_host(status="0")
+        mock_zabbix.host.get.return_value = self._make_zabbix_host(
+            hostname="test-device", status="0"
+        )
 
         syncer = Sync()
         syncer.connect(
@@ -1702,6 +1761,70 @@ class TestDeviceStatusHandling(unittest.TestCase):
 
         mock_zabbix.host.create.assert_not_called()
         mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_existing_device_gets_additional_agent_interface(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A synced SNMP host receives its additional agent interface."""
+        device = MockNetboxDevice(
+            name="linux-host",
+            status_label="Active",
+            zabbix_hostid=42,
+            config_context={
+                "zabbix": {
+                    "interface_type": 2,
+                    "snmp": {"version": 2},
+                    "additional_interfaces": [{"interface_type": 1}],
+                }
+            },
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.host.get.return_value = self._make_zabbix_host(
+            hostname="linux-host", status="0"
+        )
+
+        syncer = Sync()
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.update.assert_called_once_with(
+            hostid=42,
+            interfaces=[
+                {
+                    "main": "1",
+                    "useip": "1",
+                    "dns": "",
+                    "ip": "192.168.1.1",
+                    "type": 2,
+                    "port": "161",
+                    "details": {
+                        "version": "2",
+                        "community": "{$SNMP_COMMUNITY}",
+                        "bulk": "1",
+                    },
+                    "interfaceid": "1",
+                },
+                {
+                    "main": "1",
+                    "useip": "1",
+                    "dns": "",
+                    "ip": "192.168.1.1",
+                    "type": 1,
+                    "port": "10050",
+                    "hostid": 42,
+                },
+            ],
+        )
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
@@ -2034,9 +2157,17 @@ class TestVMStatusHandling(unittest.TestCase):
                 "hostgroups": [{"groupid": "1"}],
                 "groups": [{"groupid": "1"}],
                 "status": status,
-                # Single empty-dict interface: len==1 avoids SyncInventoryError,
-                # empty keys mean no spurious interface-update calls.
-                "interfaces": [{}],
+                "interfaces": [
+                    {
+                        "interfaceid": "1",
+                        "main": "1",
+                        "useip": "1",
+                        "dns": "",
+                        "ip": "192.168.1.1",
+                        "type": "1",
+                        "port": "10050",
+                    }
+                ],
                 "inventory_mode": "-1",
                 "inventory": {},
                 "macros": [],
@@ -2667,8 +2798,23 @@ class TestAdoptExistingHosts(unittest.TestCase):
         mock_zabbix.host.delete.return_value = [42]
         return mock_zabbix
 
-    def _make_zabbix_host(self, hostname="test-host", status="0"):
+    def _make_zabbix_host(self, hostname="test-host", status="0", interface_type=2):
         """Build a minimal host response for consistency_check."""
+        interface = {
+            "interfaceid": "1",
+            "main": "1",
+            "useip": "1",
+            "dns": "",
+            "ip": "192.168.1.1",
+            "type": str(interface_type),
+            "port": "161" if interface_type == SNMP_INTERFACE_TYPE else "10050",
+        }
+        if interface_type == SNMP_INTERFACE_TYPE:
+            interface["details"] = {
+                "version": "2",
+                "community": "{$SNMP_COMMUNITY}",
+                "bulk": "1",
+            }
         return [
             {
                 "hostid": "77",
@@ -2678,7 +2824,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
                 "hostgroups": [{"groupid": "1"}],
                 "groups": [{"groupid": "1"}],
                 "status": status,
-                "interfaces": [{}],
+                "interfaces": [interface],
                 "inventory_mode": "-1",
                 "inventory": {},
                 "macros": [],
@@ -3307,7 +3453,9 @@ class TestAdoptExistingHosts(unittest.TestCase):
         vm.custom_fields["vmware_lld_hostid"] = 77
         self._setup_netbox_mock(mock_api, vms=[vm])
         mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
-        dedicated_host = self._make_zabbix_host("vmware-dual-host-stored")[0]
+        dedicated_host = self._make_zabbix_host(
+            "vmware-dual-host-stored", interface_type=1
+        )[0]
         discovered_host = self._make_lld_zabbix_host("vmware-dual-host-stored")
         mock_zabbix.host.get.side_effect = [[dedicated_host], [discovered_host]]
 
@@ -3492,7 +3640,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
         mock_zabbix.host.get.side_effect = [
             [{"hostid": "77", "host": "esxi-vm01", "name": "esxi-vm01"}],
             [],
-            self._make_zabbix_host(hostname="esxi-vm01", status="0"),
+            self._make_zabbix_host(hostname="esxi-vm01", status="0", interface_type=1),
         ]
 
         syncer = Sync(
@@ -3766,7 +3914,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
         )
         self._setup_netbox_mock(mock_api, vms=[vm])
         mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
-        host = self._make_zabbix_host(hostname="esxi-vm-groups")[0]
+        host = self._make_zabbix_host(hostname="esxi-vm-groups", interface_type=1)[0]
         host["hostgroups"] = [{"groupid": "2"}]
         host["groups"] = [{"groupid": "2"}]
         mock_zabbix.host.get.side_effect = [
@@ -3821,7 +3969,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
                 }
             ],
             [],
-            self._make_zabbix_host(hostname="azure-vm01", status="0"),
+            self._make_zabbix_host(hostname="azure-vm01", status="0", interface_type=1),
         ]
 
         syncer = Sync(
@@ -3889,7 +4037,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
                 },
             ],
             [],
-            self._make_zabbix_host(hostname="azure-vm02", status="0"),
+            self._make_zabbix_host(hostname="azure-vm02", status="0", interface_type=1),
         ]
 
         syncer = Sync(
@@ -3976,7 +4124,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
                 }
             ],
             [],
-            self._make_zabbix_host(hostname="azure-vm03", status="1"),
+            self._make_zabbix_host(hostname="azure-vm03", status="1", interface_type=1),
         ]
 
         syncer = Sync(
@@ -4085,7 +4233,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
         mock_zabbix.host.get.side_effect = [
             [{"hostid": "77", "host": "esxi-vm02", "name": "esxi-vm02"}],
             [],
-            self._make_zabbix_host(hostname="esxi-vm02", status="1"),
+            self._make_zabbix_host(hostname="esxi-vm02", status="1", interface_type=1),
         ]
 
         syncer = Sync(
@@ -4128,7 +4276,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
         mock_zabbix.host.get.side_effect = [
             [{"hostid": "77", "host": "esxi-vm03", "name": "esxi-vm03"}],
             [],
-            self._make_zabbix_host(hostname="esxi-vm03", status="1"),
+            self._make_zabbix_host(hostname="esxi-vm03", status="1", interface_type=1),
         ]
 
         syncer = Sync(
@@ -4183,6 +4331,14 @@ class TestOntapClusterSync(unittest.TestCase):
 
     def test_syncs_ontap_cluster_using_custom_field_ip_and_member_site(self):
         cluster = MockNetboxCluster(name="ontap-prod", primary_ip="192.0.2.10/24")
+        cluster.config_context = {
+            "zabbix": {
+                "templates": ["TestTemplate"],
+                "additional_interfaces": [
+                    {"interface_type": 2, "snmp": {"version": 2}}
+                ],
+            }
+        }
         attached_device = MockNetboxDevice(name="ontap-node-1")
         syncer, zabbix = self._syncer(cluster, [attached_device])
 
@@ -4192,6 +4348,10 @@ class TestOntapClusterSync(unittest.TestCase):
         create_kwargs = zabbix.host.create.call_args.kwargs
         self.assertEqual(create_kwargs["host"], "ontap-prod")
         self.assertEqual(create_kwargs["interfaces"][0]["ip"], "192.0.2.10")
+        self.assertEqual(
+            [interface["type"] for interface in create_kwargs["interfaces"]],
+            ["1", 2],
+        )
         self.assertEqual(create_kwargs["groups"], [{"groupid": "1"}])
         syncer.netbox.dcim.devices.filter.assert_any_call(cluster_id=cluster.id)
 

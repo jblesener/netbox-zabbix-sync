@@ -1115,16 +1115,10 @@ provided:
 - Bulk requests enabled
 - SNMP community: {$SNMP_COMMUNITY}
 
-Due to Zabbix limitations of changing interface type with a linked template,
-changing the interface type from within NetBox is not supported and the script
-will generate an error.
-
-For example, when changing a SNMP interface to an Agent interface:
-
-```
-NetBox-Zabbix-sync - WARNING - Device: Interface OUT of sync.
-NetBox-Zabbix-sync - ERROR - Device: changing interface type to 1 is not supported.
-```
+Changing an interface type is handled by replacing the old interface rather than
+modifying its type in place. Interfaces of the same type retain their Zabbix IDs
+when possible. Zabbix may reject a replacement when linked templates or items
+depend on the old interface; such API failures are reported as host sync errors.
 
 To configure the interface parameters you'll need to use custom context. Custom
 context was used to make this script as customizable as possible for each
@@ -1180,6 +1174,47 @@ environment. For example, you could:
     }
 }
 ```
+
+##### Multiple interfaces
+
+The existing `interface_type`, `interface_port`, and `snmp` settings define the
+primary interface. Add `additional_interfaces` under `zabbix` to configure further
+interfaces for the same Zabbix host. For example, a Linux host can keep SNMP as its
+primary interface and also expose a Zabbix agent interface:
+
+```json
+{
+    "zabbix": {
+        "interface_type": 2,
+        "snmp": {
+            "version": 2,
+            "community": "{$SNMP_COMMUNITY}"
+        },
+        "additional_interfaces": [
+            {
+                "interface_type": 1,
+                "interface_port": 10050
+            }
+        ]
+    }
+}
+```
+
+Each additional entry must define `interface_type` (1 Agent, 2 SNMP, 3 IPMI, or
+4 JMX). It can also set `interface_port` and, for SNMP, an `snmp` object. By default,
+an additional interface uses the host's primary IP, an empty DNS name, and `useip=1`.
+Override `ip`, `dns`, and `useip` to use a different endpoint; DNS-based interfaces
+must set `useip=0` and a non-empty `dns`. An IP-less VM can have additional interfaces
+only when their endpoint is explicitly configured.
+
+By default the first interface of each type is marked `main=1` and any later
+interfaces of that same type are marked `main=0`. You may explicitly set `main` to
+`0` or `1`, but each configured interface type must end up with exactly one main
+interface. Invalid additional-interface configuration fails sync for that host.
+
+The effective config-context interface list is authoritative: interfaces in Zabbix
+that are not configured here are removed during sync. Existing configurations without
+`additional_interfaces` continue to define only the primary interface.
 
 I would recommend using usermacros for sensitive data such as community strings
 since the data in NetBox is plain-text.
