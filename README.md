@@ -30,6 +30,41 @@ docker run -d -t -i -e ZABBIX_HOST='https://zabbix.local' \
 This should run a one-time sync. You can check the sync with
 `docker logs netbox-zabbix-sync`.
 
+Each completed sync also writes `sync-status.json` to the process working
+directory (the same directory used for `sync.log`). Mount that directory if a
+host-side static webpage needs to read the report. The file is replaced
+atomically after each run.
+
+The JSON contains a `generated_at` timestamp and a `targets` array. Each target
+has this shape:
+
+```json
+{
+  "type": "device",
+  "netbox_id": 123,
+  "name": "router01",
+  "netbox_status": "Active",
+  "zabbix_hostid": "456",
+  "zabbix_enabled": "enabled",
+  "zabbix_interfaces": [
+    {"interfaceid": "789", "type": 2, "availability": 1}
+  ],
+  "sync_result": "synced",
+  "reason": null,
+  "status_error": null
+}
+```
+
+`zabbix_enabled` is `enabled`, `disabled`, or `null`. Each interface's
+`availability` uses Zabbix's numeric values: `0` unknown, `1` available, and
+`2` unavailable. `sync_result` is `synced`, `skipped`, `failed`, `removed`, or
+`excluded_by_filter`; unavailable or inapplicable status values are `null`.
+
+Targets include all objects in enabled sync categories, including those
+excluded by configured filters, plus sync skips, failures, and removals.
+Categories disabled by configuration are not scanned for the report. A
+report-write error is logged but does not fail an otherwise completed sync; if
+that happens, the previous report remains in place.
 The image uses the default `config.py` for its configuration, you can use a
 volume mount in the docker run command to override with your own config file if
 needed (see [config file](#config-file)):
@@ -324,6 +359,16 @@ Behavior:
   uniquely name-matched, LLD-created VMware VM Discovery host in
   `vmware_vm_adopted_hostid_cf`. This VM-specific opt-in is independent of
   `adopt_scope`, which continues to control ordinary primary-host adoption.
+- If a VMware VM's primary `device_cf` already points to an LLD-created host,
+  the syncer detects it before normal reconciliation, moves the LLD ID into
+  `vmware_vm_adopted_hostid_cf`, clears `device_cf`, and creates or syncs a
+  dedicated primary host. The secondary field must exist and be empty or
+  already contain that same ID. If it is missing or contains a different ID,
+  the syncer leaves both links unchanged, logs a warning, and skips that VM's
+  reconciliation.
+- A newly matched VMware LLD host is never adopted as the primary managed host.
+  If dual-host adoption is not configured, it is left unlinked and the syncer
+  falls through to the normal dedicated-host path.
 - The adopted vSphere host receives only LLD-safe enrichment: NetBox-managed
   macros that do not conflict with automatic LLD macros, and NetBox tags. Its
   LLD-managed names, templates, groups, interfaces, proxy, status, inventory,
@@ -368,11 +413,11 @@ create the new integer custom field, copy the existing ID to it, and clear
 `device_cf`. On the next run, the syncer creates the dedicated host and keeps
 the LLD host as the separate metadata target.
 
-To migrate a VMware-discovered VM whose `device_cf` currently points at its LLD
-host, create the VM integer custom field configured by
-`vmware_vm_adopted_hostid_cf`, copy the existing ID to it, and clear
-`device_cf`. On the next run, the syncer creates the dedicated VM host and
-keeps the VMware VM Discovery host as the separate metadata target.
+For legacy VMware-discovered VM links, create and configure the integer VM
+custom field `vmware_vm_adopted_hostid_cf`; the next sync moves the existing LLD
+ID to it and creates the dedicated primary VM host automatically. If the
+secondary field already contains a different ID, resolve that conflict
+manually before syncing.
 
 For Azure VM adoption from the `Azure by HTTP` discovery, use:
 

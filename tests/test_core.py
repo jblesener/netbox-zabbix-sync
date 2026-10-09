@@ -1,6 +1,9 @@
 """Tests for the core sync module."""
 
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import ClassVar
 from unittest.mock import MagicMock, call, patch
 
@@ -3457,7 +3460,11 @@ class TestAdoptExistingHosts(unittest.TestCase):
             "vmware-dual-host-stored", interface_type=1
         )[0]
         discovered_host = self._make_lld_zabbix_host("vmware-dual-host-stored")
-        mock_zabbix.host.get.side_effect = [[dedicated_host], [discovered_host]]
+        mock_zabbix.host.get.side_effect = [
+            [dedicated_host],
+            [dedicated_host],
+            [discovered_host],
+        ]
 
         syncer = Sync(
             {
@@ -4298,6 +4305,299 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
         mock_zabbix.host.update.assert_called_once_with(hostid=77, status="0")
 
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_repairs_existing_primary_lld_link(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A primary link to VMware LLD is moved before dedicated-host sync."""
+        lld_hostid = 77
+        platform = MagicMock()
+        platform.name = "VMware vSphere"
+        vm = MockNetboxVM(
+            name="vmware-legacy-link",
+            status_label="Active",
+            zabbix_hostid=lld_hostid,
+            platform=platform,
+        )
+        vm.custom_fields["vmware_lld_hostid"] = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [{"hostid": str(lld_hostid), "flags": "4"}],
+            [],
+            [self._make_lld_zabbix_host("vmware-legacy-link")],
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+        self.assertEqual(vm.custom_fields["vmware_lld_hostid"], lld_hostid)
+        mock_zabbix.host.create.assert_called_once()
+        self.assertFalse(
+            any(
+                update.kwargs.get("hostid") == lld_hostid
+                for update in mock_zabbix.host.update.call_args_list
+            )
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_does_not_overwrite_unsafe_lld_link(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Missing or conflicting secondary fields leave both links untouched."""
+        for custom_fields in (
+            {"zabbix_hostid": 77},
+            {"zabbix_hostid": 77, "vmware_lld_hostid": 99},
+        ):
+            with self.subTest(custom_fields=custom_fields):
+                platform = MagicMock()
+                platform.name = "VMware vSphere"
+                vm = MockNetboxVM(
+                    name="vmware-unsafe-link",
+                    status_label="Active",
+                    platform=platform,
+                    custom_fields=custom_fields.copy(),
+                )
+                self._setup_netbox_mock(mock_api, vms=[vm])
+                mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+                mock_zabbix.host.get.return_value = [{"hostid": "77", "flags": "4"}]
+
+                syncer = Sync(
+                    {
+                        "sync_vms": True,
+                        "vm_hostgroup_format": "site/role",
+                        "adopt_existing_hosts": True,
+                        "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+                    }
+                )
+                syncer.connect(
+                    "http://netbox.local",
+                    "nb_token",
+                    "http://zabbix.local",
+                    "user",
+                    "pass",
+                    None,
+                )
+                syncer.start()
+
+                self.assertEqual(vm.custom_fields, custom_fields)
+                mock_zabbix.host.create.assert_not_called()
+                mock_zabbix.host.update.assert_not_called()
+                summary = syncer.last_unsynced_summary
+                assert summary is not None
+                self.assertIn(
+                    "VMware LLD host link is not configured for safe dual-host sync",
+                    summary.intentional,
+                )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_vm_save_failure_restores_both_host_links(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A failed migration save retains the primary and secondary IDs."""
+        platform = MagicMock()
+        platform.name = "VMware vSphere"
+        vm = MockNetboxVM(
+            name="vmware-save-failure",
+            status_label="Active",
+            zabbix_hostid=77,
+            platform=platform,
+        )
+        vm.custom_fields["vmware_lld_hostid"] = None
+        response = MagicMock()
+        response.status_code = 400
+        response.reason = "Bad Request"
+        response.json.return_value = {"custom_fields": ["Invalid custom field."]}
+        response.request.body = b'{"custom_fields":{"zabbix_hostid":null}}'
+        response.url = "http://netbox.local/api/virtualization/virtual-machines/1/"
+        response.text = str(response.json.return_value)
+
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.return_value = [{"hostid": "77", "flags": "4"}]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+                "vmware_vm_adopted_hostid_cf": "vmware_lld_hostid",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        with patch.object(vm, "save", side_effect=NetboxRequestError(response)):
+            syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 77)
+        self.assertIsNone(vm.custom_fields["vmware_lld_hostid"])
+        mock_zabbix.host.create.assert_not_called()
+        summary = syncer.last_unsynced_summary
+        assert summary is not None
+        self.assertEqual(
+            summary.failures["external NetBox or Zabbix sync error"],
+            ["VM vmware-save-failure"],
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_vmware_lld_match_is_not_adopted_as_primary_without_secondary_field(
+        self, mock_api, mock_zabbix_api
+    ):
+        """An unconfigured VMware LLD match is left for the dedicated host path."""
+        platform = MagicMock()
+        platform.name = "VMware ESXi"
+        vm = MockNetboxVM(
+            name="vmware-no-secondary-field",
+            status_label="Active",
+            platform=platform,
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        mock_zabbix.host.get.side_effect = [
+            [
+                {
+                    "hostid": "77",
+                    "host": "vmware-uuid-no-secondary-field",
+                    "name": "vmware-no-secondary-field",
+                    "flags": "4",
+                }
+            ],
+            [],
+            [],
+        ]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "adopt_existing_hosts": True,
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        self.assertEqual(vm.custom_fields["zabbix_hostid"], 1)
+        mock_zabbix.host.create.assert_called_once()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_lld_macro_update_preserves_discovery_macros_without_automatic_flag(
+        self, mock_api, mock_zabbix_api
+    ):
+        """LLD automatic macros remain discovery-owned during host updates."""
+        vm = MockNetboxVM(
+            name="lld-macro-update",
+            status_label="Active",
+            zabbix_hostid=77,
+            config_context={
+                "zabbix": {
+                    "templates": ["TestTemplate"],
+                    "usermacros": {
+                        "{$TOTAL_MEMORY}": "4096",
+                        "{$NB_ID}": "new",
+                    },
+                }
+            },
+        )
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api, vm_mode=True)
+        host = self._make_lld_zabbix_host("lld-macro-update")
+        host["macros"] = [
+            {
+                "hostmacroid": "400",
+                "macro": "{$TOTAL_MEMORY}",
+                "value": "2048",
+                "type": "0",
+                "description": "LLD value",
+                "automatic": "1",
+            },
+            {
+                "hostmacroid": "401",
+                "macro": "{$LLD_ONLY}",
+                "value": "discovered",
+                "type": "0",
+                "description": "",
+                "automatic": "1",
+            },
+            {
+                "hostmacroid": "402",
+                "macro": "{$NB_ID}",
+                "value": "old",
+                "type": "0",
+                "description": "",
+                "automatic": "0",
+            },
+        ]
+        mock_zabbix.host.get.return_value = [host]
+
+        syncer = Sync(
+            {
+                "sync_vms": True,
+                "vm_hostgroup_format": "site/role",
+                "usermacro_sync": "partial",
+                "vm_usermacro_map": {},
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        macro_update = next(
+            update
+            for update in mock_zabbix.host.update.call_args_list
+            if "macros" in update.kwargs
+        )
+        macros = macro_update.kwargs["macros"]
+        self.assertEqual(
+            [macro["macro"] for macro in macros],
+            ["{$TOTAL_MEMORY}", "{$LLD_ONLY}", "{$NB_ID}"],
+        )
+        self.assertEqual(
+            [macro["value"] for macro in macros], ["2048", "discovered", "new"]
+        )
+        self.assertTrue(all("automatic" not in macro for macro in macros))
+        self.assertEqual(macros[0]["hostmacroid"], "400")
+
 
 class TestOntapClusterSync(unittest.TestCase):
     """Validate the adapted virtualization-cluster sync path."""
@@ -4439,6 +4739,13 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
             ],
             ["Device retired-router"],
         )
+        report_targets = {
+            target["type"]: target
+            for target in syncer.last_status_report.document()["targets"]
+        }
+        self.assertEqual(report_targets["device"]["sync_result"], "skipped")
+        self.assertEqual(report_targets["device_oob"]["sync_result"], "failed")
+        self.assertEqual(report_targets["device_oob"]["reason"], "missing OOB IP")
 
     def test_logs_zero_count_summary(self):
         summary = UnsyncedSummary()
@@ -4456,4 +4763,171 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
 
         self.assertEqual(
             summary.failures["unclassified sync error"], ["Device unexpected"]
+        )
+
+    def test_json_report_includes_filter_exclusions_for_enabled_categories(self):
+        device = MockNetboxDevice(
+            device_id=1,
+            name="filtered-device",
+            zabbix_hostid=81,
+            config_context={"zabbix": {"oob": {"name_prefix": "mgmt-"}}},
+        )
+        device.custom_fields["zabbix_oob_hostid"] = 82
+        vm = MockNetboxVM(vm_id=2, name="filtered-vm", zabbix_hostid=83)
+        cluster = MockNetboxCluster(
+            cluster_id=3, name="filtered-ontap", zabbix_hostid=84
+        )
+        tenant = MockNetboxTenant(tenant_id=4, name="untagged-tenant", zabbix_hostid=85)
+        syncer = self._syncer(
+            config={
+                "nb_device_filter": {"name": "selected-device"},
+                "sync_vms": True,
+                "nb_vm_filter": {"name": "selected-vm"},
+                "sync_ontap_clusters": True,
+                "nb_ontap_cluster_filter": {"name": "selected-ontap"},
+                "sync_azure_subscriptions": True,
+                "azure_tag": "azure",
+            }
+        )
+        syncer.netbox.dcim.devices.all.return_value = [device]
+        syncer.netbox.dcim.devices.filter.return_value = []
+        syncer.netbox.virtualization.virtual_machines.all.return_value = [vm]
+        syncer.netbox.virtualization.virtual_machines.filter.return_value = []
+        syncer.netbox.virtualization.clusters.all.return_value = [cluster]
+        syncer.netbox.virtualization.clusters.filter.return_value = []
+        syncer.netbox.tenancy.tenants.all.return_value = [tenant]
+        syncer.netbox.tenancy.tenants.filter.return_value = []
+        syncer.zabbix.host.get.return_value = [
+            {"hostid": str(hostid), "status": status}
+            for hostid, status in (
+                (81, "0"),
+                (82, "1"),
+                (83, "0"),
+                (84, "1"),
+                (85, "0"),
+            )
+        ]
+        syncer.zabbix.hostinterface.get.return_value = [
+            {
+                "hostid": str(hostid),
+                "interfaceid": str(hostid + 100),
+                "type": 1,
+                "available": 1,
+            }
+            for hostid in range(81, 86)
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ):
+                self.assertTrue(syncer.start())
+
+            report_path = Path(temp_dir) / "sync-status.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        targets = {target["name"]: target for target in report["targets"]}
+        self.assertEqual(
+            set(targets),
+            {
+                "filtered-device",
+                "mgmt-filtered-device",
+                "filtered-vm",
+                "filtered-ontap",
+                "untagged-tenant",
+            },
+        )
+        self.assertTrue(
+            all(
+                target["sync_result"] == "excluded_by_filter"
+                for target in targets.values()
+            )
+        )
+        self.assertEqual(targets["filtered-device"]["netbox_status"], "Active")
+        self.assertEqual(targets["filtered-device"]["zabbix_enabled"], "enabled")
+        self.assertEqual(targets["mgmt-filtered-device"]["zabbix_enabled"], "disabled")
+        self.assertEqual(
+            targets["filtered-vm"]["zabbix_interfaces"][0]["availability"], 1
+        )
+        self.assertIsNone(targets["untagged-tenant"]["netbox_status"])
+        syncer.netbox.virtualization.virtual_machines.filter.assert_called_once_with(
+            name="selected-vm"
+        )
+        syncer.netbox.tenancy.tenants.filter.assert_called_once_with(tag="azure")
+
+    def test_disabled_categories_are_not_added_to_report(self):
+        syncer = self._syncer()
+
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ):
+                syncer.start()
+            report = json.loads(
+                (Path(temp_dir) / "sync-status.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(report["targets"], [])
+        syncer.netbox.virtualization.virtual_machines.all.assert_not_called()
+        syncer.netbox.virtualization.clusters.all.assert_not_called()
+        syncer.netbox.tenancy.tenants.all.assert_not_called()
+
+    def test_report_write_failure_does_not_fail_the_sync(self):
+        syncer = self._syncer()
+
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ),
+            patch(
+                "netbox_zabbix_sync.modules.status_report.SyncStatusReport.write",
+                side_effect=PermissionError("read-only directory"),
+            ),
+            self.assertLogs("NetBox-Zabbix-sync", level="ERROR") as log_context,
+        ):
+            self.assertTrue(syncer.start())
+
+        self.assertTrue(
+            any(
+                "Unable to write sync-status.json" in message
+                for message in log_context.output
+            )
+        )
+
+    def test_json_report_includes_final_status_for_synced_device(self):
+        device = MockNetboxDevice(device_id=11, name="synced-router")
+        syncer = self._syncer(devices=[device])
+        syncer.zabbix.version = 7.0
+        syncer.zabbix.host.create.return_value = {"hostids": ["42"]}
+        syncer.zabbix.hostinterface.get.return_value = [
+            {
+                "hostid": "42",
+                "interfaceid": "91",
+                "type": 2,
+                "available": 2,
+            }
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ):
+                self.assertTrue(syncer.start())
+            report = json.loads(
+                (Path(temp_dir) / "sync-status.json").read_text(encoding="utf-8")
+            )
+
+        target = next(item for item in report["targets"] if item["name"] == device.name)
+        self.assertEqual(target["sync_result"], "synced")
+        self.assertEqual(target["netbox_status"], "Active")
+        self.assertEqual(target["zabbix_enabled"], "enabled")
+        self.assertEqual(target["zabbix_hostid"], "42")
+        self.assertEqual(
+            target["zabbix_interfaces"],
+            [{"interfaceid": "91", "type": 2, "availability": 2}],
         )

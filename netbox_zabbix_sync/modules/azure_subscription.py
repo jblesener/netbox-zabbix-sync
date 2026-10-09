@@ -32,6 +32,8 @@ class AzureSubscription:
         self.visible_name = None
         self.use_visible_name = False
         self.zabbix_id = None
+        self.zabbix_status = None
+        self.zabbix_interfaces = None
         self.group_ids = []
         self.zbx_templates = []
         self.macros = []
@@ -305,6 +307,7 @@ class AzureSubscription:
         try:
             host = self.zabbix.host.create(**create_data)
             self.zabbix_id = host["hostids"][0]
+            self.zabbix_status = "0"
         except APIRequestError as e:
             message = f"Host {self.name}: Couldn't create. Zabbix returned {e}."
             self.logger.error(message)
@@ -331,6 +334,8 @@ class AzureSubscription:
             )
             self.logger.error(message)
             raise SyncExternalError(message) from None
+        if "status" in kwargs:
+            self.zabbix_status = kwargs["status"]
         self.logger.info(
             "Host %s: updated with data %s.", self.name, sanatize_log_output(kwargs)
         )
@@ -343,7 +348,7 @@ class AzureSubscription:
         try:
             host = self.zabbix.host.get(
                 filter={"hostid": self.zabbix_id},
-                selectInterfaces=["interfaceid"],
+                selectInterfaces=["interfaceid", "type", "available"],
                 selectGroups=["groupid"],
                 selectHostGroups=["groupid"],
                 selectParentTemplates=["templateid"],
@@ -400,6 +405,8 @@ class AzureSubscription:
         if clear_stale_hostids:
             self._prepare_zabbix_references(groups, templates, create_hostgroups)
         host = host[0]
+        self.zabbix_status = host.get("status")
+        self.zabbix_interfaces = host.get("interfaces")
         if host["host"] != self.name:
             self.logger.info("Host %s: Hostname OUT of sync.", self.name)
             self.update_zabbix_host(host=self.name)

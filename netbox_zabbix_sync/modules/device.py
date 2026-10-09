@@ -153,6 +153,8 @@ class PhysicalDevice:
         self.config_context = nb.config_context
         self.zbxproxy = None
         self.zabbix_state = 0
+        self.zabbix_status = None
+        self.zabbix_interfaces = None
         self.journal = journal
         self.nb_journals = nb_journal_class
         self.inventory_mode = -1
@@ -691,6 +693,10 @@ class PhysicalDevice:
             and "vmware" in self._platform_name().lower()
         )
 
+    def _is_vmware_vm(self):
+        """Return whether this import represents a VM on a VMware platform."""
+        return self.hostgroup_type == "vm" and "vmware" in self._platform_name().lower()
+
     def _uses_lld_dual_host_mode(self):
         """Return whether this object manages a dedicated host and linked LLD host."""
         return self._uses_esxi_dual_host_mode() or self._uses_vmware_vm_dual_host_mode()
@@ -838,6 +844,87 @@ class PhysicalDevice:
             self.logger.error(message)
             raise SyncExternalError(message) from e
 
+    def repair_vmware_vm_lld_host_link(self):
+        """Move a linked VMware LLD host ID out of the primary host field."""
+        if not self.zabbix_id or not self._is_vmware_vm():
+            return None
+
+        try:
+            hosts = self.zabbix.host.get(
+                filter={"hostid": self.zabbix_id},
+                output=["hostid", "flags"],
+            )
+        except APIRequestError as e:
+            message = (
+                f"Host {self.name}: Unable to verify primary Zabbix host "
+                f"{self.zabbix_id} before VMware LLD link repair. "
+                f"Zabbix returned {e}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from e
+
+        if len(hosts) != 1 or not self._is_discovered_host(hosts[0]):
+            return None
+
+        hostid = int(self.zabbix_id)
+        field_name = self.config.get("vmware_vm_adopted_hostid_cf")
+        custom_fields = self.nb.custom_fields
+        if (
+            not self._uses_vmware_vm_dual_host_mode()
+            or not field_name
+            or field_name == self.device_cf
+            or field_name not in custom_fields
+        ):
+            self.logger.warning(
+                "Host %s: Primary Zabbix host %s is VMware LLD-created; "
+                "dual-host adoption is not configured correctly. Leaving the "
+                "NetBox links unchanged and skipping reconciliation.",
+                self.name,
+                hostid,
+            )
+            return False
+
+        existing_lld_hostid = custom_fields[field_name]
+        if existing_lld_hostid not in (None, "") and str(existing_lld_hostid) != str(
+            hostid
+        ):
+            self.logger.warning(
+                "Host %s: VMware LLD host %s cannot be moved to custom field %s "
+                "because it already contains host ID %s. Leaving the NetBox "
+                "links unchanged and skipping reconciliation.",
+                self.name,
+                hostid,
+                field_name,
+                existing_lld_hostid,
+            )
+            return False
+
+        previous_primary_hostid = custom_fields[self.device_cf]
+        previous_lld_hostid = existing_lld_hostid
+        custom_fields[field_name] = hostid
+        custom_fields[self.device_cf] = None
+        try:
+            self.nb.save()
+        except NetboxRequestError as e:
+            custom_fields[self.device_cf] = previous_primary_hostid
+            custom_fields[field_name] = previous_lld_hostid
+            message = (
+                f"Host {self.name}: Unable to move VMware LLD host ID {hostid} "
+                f"to NetBox custom field {field_name}. NetBox returned {e}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from e
+
+        self.zabbix_id = None
+        self.logger.info(
+            "Host %s: Moved VMware LLD host ID %s to custom field %s; "
+            "a dedicated primary host will be synchronized.",
+            self.name,
+            hostid,
+            field_name,
+        )
+        return True
+
     def adopt_existing_zabbix_host(self):
         """
         Link to an existing Zabbix host by name if this object is in adoption scope.
@@ -852,6 +939,14 @@ class PhysicalDevice:
             return False
         host = self._find_unique_existing_zabbix_host()
         if not host:
+            return False
+        if self._is_vmware_vm() and self._is_discovered_host(host):
+            self.logger.warning(
+                "Host %s: Matched Zabbix host %s is VMware LLD-created; "
+                "it will not be adopted as the primary managed host.",
+                self.name,
+                host["hostid"],
+            )
             return False
 
         previous_zabbix_id = self.zabbix_id
@@ -1130,8 +1225,8 @@ class PhysicalDevice:
             ]
             netbox_macros = ZabbixUsermacros.merge_partial(manual, netbox_macros)
 
-        update_macros = automatic + netbox_macros
-        compare_macros = deepcopy(update_macros)
+        desired_macros = automatic + netbox_macros
+        compare_macros = deepcopy(desired_macros)
         if sync_mode != "full":
             for macro in compare_macros:
                 if macro.get("type") == str(1):
@@ -1154,6 +1249,10 @@ class PhysicalDevice:
             return
 
         self.logger.info("Host %s: Usermacros OUT of sync.", self.name)
+        update_macros = [
+            {key: value for key, value in macro.items() if key != "automatic"}
+            for macro in desired_macros
+        ]
         self._update_zabbix_host_by_id(hostid or self.zabbix_id, macros=update_macros)
 
     def _sync_discovered_tags(self, host, hostid=None):
@@ -1586,6 +1685,7 @@ class PhysicalDevice:
             try:
                 host = self.zabbix.host.create(**create_data)
                 self.zabbix_id = host["hostids"][0]
+                self.zabbix_status = str(self.zabbix_state)
             except APIRequestError as e:
                 msg = f"Host {self.name}: Couldn't create. Zabbix returned {e}."
                 self.logger.error(msg)
@@ -1653,6 +1753,8 @@ class PhysicalDevice:
             )
             self.logger.error(e)
             raise SyncExternalError(e) from None
+        if "status" in kwargs:
+            self.zabbix_status = kwargs["status"]
         self.logger.info(
             "Host %s: updated with data %s.", self.name, sanatize_log_output(kwargs)
         )
@@ -1690,6 +1792,7 @@ class PhysicalDevice:
                     "main",
                     "details",
                     "interfaceid",
+                    "available",
                 ],
                 selectGroups=["groupid", "flags"],
                 selectHostGroups=["groupid", "flags"],
@@ -1757,6 +1860,8 @@ class PhysicalDevice:
             # their hostgroup work must wait until discovery status is known.
             self.zbx_template_prepper(templates)
         host = host[0]
+        self.zabbix_status = host.get("status")
+        self.zabbix_interfaces = host.get("interfaces")
         discovered_host = self._is_discovered_host(host)
         sync_lld_hostgroups = bool(self.config.get("sync_lld_hostgroups", False))
 

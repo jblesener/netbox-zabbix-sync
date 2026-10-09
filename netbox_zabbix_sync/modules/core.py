@@ -2,8 +2,8 @@
 
 import ssl
 from collections import defaultdict
-from contextlib import suppress
 from os import environ
+from pathlib import Path
 from pprint import pformat
 from re import fullmatch
 from typing import Any, cast
@@ -24,6 +24,7 @@ from netbox_zabbix_sync.modules.device import (
 from netbox_zabbix_sync.modules.exceptions import SyncError
 from netbox_zabbix_sync.modules.logging import get_logger
 from netbox_zabbix_sync.modules.settings import DEFAULT_CONFIG
+from netbox_zabbix_sync.modules.status_report import SyncStatusReport
 from netbox_zabbix_sync.modules.tools import (
     convert_recordset,
     proxy_prepper,
@@ -46,6 +47,17 @@ class UnsyncedSummary:
         records = self.intentional if intentional else self.failures
         if label not in records[reason]:
             records[reason].append(label)
+
+    def outcome_for(self, label: str):
+        """Return the recorded result and reason for one target label."""
+        for reason, labels in self.failures.items():
+            if label in labels:
+                return "failed", reason
+        for reason, labels in self.intentional.items():
+            if label in labels:
+                result = "removed" if reason.startswith("removed due to") else "skipped"
+                return result, reason
+        return None
 
     def log(self, log):
         """Write the end-of-run summary at warning level for normal job logs."""
@@ -85,6 +97,8 @@ class CleanupSummary:
     def __init__(self):
         self.removed: list[str] = []
         self.failures: list[str] = []
+        self.removed_targets: list[dict[str, Any]] = []
+        self.failure_targets: list[dict[str, Any]] = []
 
     def log(self, log):
         if self.removed:
@@ -130,6 +144,7 @@ class Sync:
         self.config: dict[str, Any] = combined_config
         self.last_unsynced_summary: UnsyncedSummary | None = None
         self.last_cleanup_summary: CleanupSummary | None = None
+        self.last_status_report: SyncStatusReport | None = None
 
     def _combine_filters(self, config_filter, method_filter):
         """
@@ -156,9 +171,11 @@ class Sync:
         """Build a concise, type-qualified name for the operator summary."""
         return f"{object_type} {name}"
 
-    def _record_sync_error(self, summary, label, error):
+    @staticmethod
+    def _sync_error_reason(error):
         """Translate expected sync exceptions into stable report categories."""
         message = str(error).lower()
+        reason = "unclassified sync error"
         if "no primary ip" in message:
             reason = "no primary IP"
         elif "custom field" in message and "not present" in message:
@@ -177,8 +194,11 @@ class Sync:
             reason = "virtual chassis has no primary member"
         elif type(error).__name__ == "SyncExternalError":
             reason = "external NetBox or Zabbix sync error"
-        else:
-            reason = "unclassified sync error"
+        return reason
+
+    def _record_sync_error(self, summary, label, error):
+        """Record a stable summary category for an expected sync exception."""
+        reason = self._sync_error_reason(error)
         summary.record(label, reason)
 
     @staticmethod
@@ -197,6 +217,203 @@ class Sync:
     def _host_label(host):
         """Build a stable Zabbix host label for cleanup logs and summaries."""
         return str(host.get("host") or host.get("name") or host.get("hostid"))
+
+    def _collect_filtered_objects(self, endpoint, filters):
+        """Return filtered objects and the complete candidate set for the endpoint."""
+        filtered = list(endpoint.filter(**filters))
+        candidates = list(endpoint.all()) if filters else list(filtered)
+        records_by_id = {self._record_id(record): record for record in candidates}
+        records_by_id.update({self._record_id(record): record for record in filtered})
+        return filtered, list(records_by_id.values())
+
+    def _add_status_target(
+        self,
+        report,
+        target_type,
+        nb_object,
+        name,
+        hostid_custom_field,
+        *,
+        result="pending",
+        reason=None,
+    ):
+        custom_fields = getattr(nb_object, "custom_fields", None)
+        hostid = (
+            custom_fields.get(hostid_custom_field)
+            if hostid_custom_field and hasattr(custom_fields, "get")
+            else None
+        )
+        return report.add_target(
+            target_type=target_type,
+            name=str(name),
+            netbox_id=self._record_id(nb_object),
+            netbox_status=report.netbox_status(nb_object),
+            zabbix_hostid=hostid,
+            sync_result=result,
+            reason=reason,
+            source_record=nb_object,
+            hostid_custom_field=hostid_custom_field,
+        )
+
+    @staticmethod
+    def _apply_summary_outcome(report, target_key, summary, label):
+        outcome = summary.outcome_for(label)
+        if outcome is None:
+            report.set_result(target_key, "synced")
+        else:
+            result, reason = outcome
+            report.set_result(target_key, result, reason)
+
+    def _add_device_status_targets(self, report, nb_device, *, selected, keys_by_label):
+        """Register primary and configured OOB imports for one device candidate."""
+        filter_result = "pending" if selected else "excluded_by_filter"
+        filter_reason = (
+            None if selected else "Does not match configured device sync filters."
+        )
+        primary_label = self._summary_label("Device", nb_device.name)
+        primary_key = self._add_status_target(
+            report,
+            "device",
+            nb_device,
+            nb_device.name,
+            self.config["device_cf"],
+            result=filter_result,
+            reason=filter_reason,
+        )
+        keys_by_label[primary_label] = primary_key
+
+        context = getattr(nb_device, "config_context", None)
+        zabbix_context = context.get("zabbix", {}) if isinstance(context, dict) else {}
+        if not isinstance(zabbix_context, dict) or "oob" not in zabbix_context:
+            return
+        oob_context = zabbix_context["oob"]
+        if oob_context is None:
+            return
+        oob_name = (
+            self._build_oob_hostname(nb_device.name, oob_context)
+            if isinstance(oob_context, dict)
+            else nb_device.name
+        )
+        oob_label = self._summary_label("Device OOB", oob_name)
+        oob_key = self._add_status_target(
+            report,
+            "device_oob",
+            nb_device,
+            oob_name,
+            self.config["oob_device_cf"],
+            result=filter_result,
+            reason=filter_reason,
+        )
+        keys_by_label[oob_label] = oob_key
+
+    def _collect_report_zabbix_status(self, report):
+        """Complete report status fields using final linked-host data."""
+        report.refresh_from_models()
+        zabbix = cast(Any, self.zabbix)
+
+        targets_missing_status = report.targets_missing_status()
+        status_hostids = sorted(
+            {target["zabbix_hostid"] for _, target in targets_missing_status}
+        )
+        if status_hostids:
+            try:
+                hosts = zabbix.host.get(
+                    output=["hostid", "status"],
+                    hostids=status_hostids,
+                    selectInterfaces=["interfaceid", "type", "available"],
+                )
+            except (APIRequestError, ProcessingError) as error:
+                logger.error(
+                    "Status report: unable to read final Zabbix status for linked "
+                    "hosts: %s",
+                    error,
+                )
+                for key, _ in targets_missing_status:
+                    report.set_status_error(
+                        key, "Unable to retrieve linked Zabbix host status."
+                    )
+            else:
+                if not isinstance(hosts, list):
+                    logger.error(
+                        "Status report: Zabbix returned an invalid host-status response."
+                    )
+                    hosts = []
+                    for key, _ in targets_missing_status:
+                        report.set_status_error(
+                            key, "Zabbix returned an invalid host-status response."
+                        )
+                found_hostids = set()
+                for host in hosts:
+                    if not isinstance(host, dict):
+                        continue
+                    hostid = str(host.get("hostid", ""))
+                    found_hostids.add(hostid)
+                    for key, target in targets_missing_status:
+                        if target["zabbix_hostid"] == hostid:
+                            status = host.get("status")
+                            report.set_zabbix_status(
+                                key, status, host.get("interfaces")
+                            )
+                            if status not in (0, 1, "0", "1"):
+                                logger.warning(
+                                    "Status report: Zabbix host ID %s returned no "
+                                    "valid enabled state.",
+                                    hostid,
+                                )
+                                report.set_status_error(
+                                    key,
+                                    "Zabbix host response omitted a valid enabled state.",
+                                )
+                for key, target in targets_missing_status:
+                    hostid = target["zabbix_hostid"]
+                    if hostid not in found_hostids:
+                        logger.warning(
+                            "Status report: linked Zabbix host ID %s was not found.",
+                            hostid,
+                        )
+                        report.set_status_error(
+                            key, "Linked Zabbix host was not found."
+                        )
+
+        hostids = report.hostids()
+        if not hostids:
+            return
+        try:
+            interfaces = zabbix.hostinterface.get(
+                hostids=hostids,
+                output=["interfaceid", "hostid", "type", "available"],
+            )
+        except (APIRequestError, ProcessingError) as error:
+            logger.error(
+                "Status report: unable to read Zabbix interface availability: %s",
+                error,
+            )
+            report.set_interface_error_for_all_hosts(
+                "Unable to retrieve Zabbix interface availability."
+            )
+            return
+        if not isinstance(interfaces, list):
+            logger.error(
+                "Status report: Zabbix returned an invalid interface-status response."
+            )
+            report.set_interface_error_for_all_hosts(
+                "Zabbix returned an invalid interface-status response."
+            )
+            return
+        interfaces_by_hostid: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for interface in interfaces:
+            if not isinstance(interface, dict) or interface.get("hostid") is None:
+                continue
+            interfaces_by_hostid[str(interface["hostid"])].append(interface)
+        for hostid in hostids:
+            report.set_interfaces_for_host(hostid, interfaces_by_hostid.get(hostid, []))
+
+    def _write_status_report(self, report):
+        self._collect_report_zabbix_status(report)
+        try:
+            report.write(Path.cwd() / "sync-status.json")
+        except (OSError, TypeError, ValueError) as error:
+            logger.error("Unable to write sync-status.json: %s", error)
 
     def _cleanup_deleted_hosts(self):
         """Remove only this deployment's marked hosts whose NetBox source vanished."""
@@ -235,7 +452,8 @@ class Sync:
 
         try:
             hosts = zabbix.host.get(
-                output=["hostid", "host", "name", "flags"],
+                output=["hostid", "host", "name", "flags", "status"],
+                selectInterfaces=["interfaceid", "type", "available"],
                 selectTags=["tag", "value"],
                 tags=[{"tag": CLEANUP_INSTANCE_TAG, "value": instance_id}],
                 evaltype=0,
@@ -324,6 +542,16 @@ class Sync:
                     error,
                 )
                 summary.failures.append(label)
+                summary.failure_targets.append(
+                    {
+                        "name": label,
+                        "hostid": host.get("hostid"),
+                        "source_type": source_type,
+                        "source_id": int(source_id),
+                        "status": host.get("status"),
+                        "interfaces": host.get("interfaces"),
+                    }
+                )
                 continue
             logger.info(
                 "Deleted-source cleanup: deleted host %s (ID:%s) for missing %s %s.",
@@ -333,6 +561,14 @@ class Sync:
                 source_id,
             )
             summary.removed.append(label)
+            summary.removed_targets.append(
+                {
+                    "name": label,
+                    "hostid": host.get("hostid"),
+                    "source_type": source_type,
+                    "source_id": int(source_id),
+                }
+            )
         summary.log(logger)
         return summary
 
@@ -475,6 +711,8 @@ class Sync:
         zabbix_proxy_list,
         summary,
         summary_label,
+        status_report,
+        report_key,
     ):
         """Sync a VM-shaped NetBox object, including an adapted ONTAP cluster."""
         vm = VirtualMachine(
@@ -486,6 +724,7 @@ class Sync:
             logger,
             config=self.config,
         )
+        status_report.attach_model(report_key, vm)
         vm.set_cleanup_source(source_type)
         linked_before_run = bool(vm.zabbix_id)
         logger.debug("Host %s: Started operations on %s.", vm.name, source_type)
@@ -529,6 +768,13 @@ class Sync:
             return
         if vm.status in self.config["zabbix_device_disable"]:
             vm.zabbix_state = 1
+        if source_type == "vm" and vm.repair_vmware_vm_lld_host_link() is False:
+            summary.record(
+                summary_label,
+                "VMware LLD host link is not configured for safe dual-host sync",
+                intentional=True,
+            )
+            return
         host_consistent = False
         if vm.zabbix_id:
             host_consistent = vm.consistency_check(
@@ -597,6 +843,8 @@ class Sync:
         zabbix_proxy_list,
         summary,
         summary_label,
+        status_report,
+        report_key,
         split_import=False,
     ):
         """Run the physical device sync pipeline for one effective device import."""
@@ -609,6 +857,7 @@ class Sync:
             logger,
             config=device_config,
         )
+        status_report.attach_model(report_key, device)
         device.set_cleanup_source("device-oob" if split_import else "device")
         linked_before_run = bool(device.zabbix_id)
         logger.debug("Host %s: Started operations on device.", device.name)
@@ -758,7 +1007,9 @@ class Sync:
         nb_tenant,
         zabbix_groups,
         zabbix_templates,
-    ):
+        status_report,
+        report_key,
+    ) -> tuple[str, str | None]:
         """Run the Azure subscription sync pipeline for one NetBox Tenant."""
         azure_subscription = AzureSubscription(
             nb_tenant,
@@ -766,12 +1017,13 @@ class Sync:
             logger,
             config=self.config,
         )
+        status_report.attach_model(report_key, azure_subscription)
         logger.debug(
             "Host %s: Started operations on Azure subscription.",
             azure_subscription.name,
         )
         if not azure_subscription.validate():
-            return True
+            return "skipped", "Azure subscription validation failed"
         azure_subscription.set_usermacros()
         had_linked_hostid = bool(azure_subscription.zabbix_id)
         adopted = azure_subscription.adopt_existing_zabbix_host()
@@ -791,16 +1043,18 @@ class Sync:
                     self.config["create_hostgroups"],
                 )
         if host_consistent:
-            return True
+            return "synced", None
         if not azure_subscription.zabbix_id:
             adopted = False
         if not adopted:
-            azure_subscription.create_in_zabbix(
+            created = azure_subscription.create_in_zabbix(
                 zabbix_groups,
                 zabbix_templates,
                 self.config["create_hostgroups"],
             )
-        return True
+            if not created:
+                return "failed", "Zabbix host already exists without NetBox linkage"
+        return "synced", None
 
     def _validate_netbox_token(self, token: str, nb_version: str) -> bool:
         """Validate the format of the NetBox token based on the NetBox version.
@@ -930,6 +1184,8 @@ class Sync:
             return False
         summary = UnsyncedSummary()
         self.last_unsynced_summary = summary
+        status_report = SyncStatusReport()
+        self.last_status_report = status_report
         device_cfs = []
         vm_cfs = []
         # Create API call to get all custom fields which are on the device objects
@@ -964,27 +1220,106 @@ class Sync:
         dev_filter_combined = self._combine_filters(
             self.config["nb_device_filter"], device_filter
         )
-        netbox_devices = list(self.netbox.dcim.devices.filter(**dev_filter_combined))
+        netbox_devices, all_netbox_devices = self._collect_filtered_objects(
+            self.netbox.dcim.devices, dev_filter_combined
+        )
         netbox_vms = []
+        all_netbox_vms = []
         if self.config["sync_vms"]:
             vm_filter_combined = self._combine_filters(
                 self.config["nb_vm_filter"], vm_filter
             )
-            netbox_vms = list(
-                self.netbox.virtualization.virtual_machines.filter(**vm_filter_combined)
+            netbox_vms, all_netbox_vms = self._collect_filtered_objects(
+                self.netbox.virtualization.virtual_machines, vm_filter_combined
             )
         netbox_ontap_clusters = []
+        all_netbox_ontap_clusters = []
         if self.config["sync_ontap_clusters"]:
-            netbox_ontap_clusters = list(
-                self.netbox.virtualization.clusters.filter(
-                    **self.config["nb_ontap_cluster_filter"]
-                )
+            (
+                netbox_ontap_clusters,
+                all_netbox_ontap_clusters,
+            ) = self._collect_filtered_objects(
+                self.netbox.virtualization.clusters,
+                self.config["nb_ontap_cluster_filter"],
             )
         netbox_azure_subscriptions = []
+        all_netbox_azure_subscriptions = []
         if self.config["sync_azure_subscriptions"]:
-            netbox_azure_subscriptions = list(
-                self.netbox.tenancy.tenants.filter(tag=self.config["azure_tag"])
+            (
+                netbox_azure_subscriptions,
+                all_netbox_azure_subscriptions,
+            ) = self._collect_filtered_objects(
+                self.netbox.tenancy.tenants, {"tag": self.config["azure_tag"]}
             )
+
+        report_keys_by_label = {}
+        selected_device_ids = {self._record_id(record) for record in netbox_devices}
+        for nb_device in all_netbox_devices:
+            selected = self._record_id(nb_device) in selected_device_ids
+            self._add_device_status_targets(
+                status_report,
+                nb_device,
+                selected=selected,
+                keys_by_label=report_keys_by_label,
+            )
+
+        selected_vm_ids = {self._record_id(record) for record in netbox_vms}
+        for nb_vm in all_netbox_vms:
+            selected = self._record_id(nb_vm) in selected_vm_ids
+            label = self._summary_label("VM", nb_vm.name)
+            key = self._add_status_target(
+                status_report,
+                "vm",
+                nb_vm,
+                nb_vm.name,
+                self.config["device_cf"],
+                result="pending" if selected else "excluded_by_filter",
+                reason=None
+                if selected
+                else "Does not match configured VM sync filters.",
+            )
+            report_keys_by_label[label] = key
+
+        selected_cluster_ids = {
+            self._record_id(record) for record in netbox_ontap_clusters
+        }
+        for nb_cluster in all_netbox_ontap_clusters:
+            if not self._is_ontap_cluster(nb_cluster):
+                continue
+            selected = self._record_id(nb_cluster) in selected_cluster_ids
+            label = self._summary_label("ONTAP cluster", nb_cluster.name)
+            key = self._add_status_target(
+                status_report,
+                "ontap_cluster",
+                nb_cluster,
+                nb_cluster.name,
+                self.config["device_cf"],
+                result="pending" if selected else "excluded_by_filter",
+                reason=None
+                if selected
+                else "Does not match configured ONTAP cluster sync filters.",
+            )
+            report_keys_by_label[label] = key
+
+        selected_tenant_ids = {
+            self._record_id(record) for record in netbox_azure_subscriptions
+        }
+        for nb_tenant in all_netbox_azure_subscriptions:
+            selected = self._record_id(nb_tenant) in selected_tenant_ids
+            label = self._summary_label("Azure subscription", nb_tenant.name)
+            key = self._add_status_target(
+                status_report,
+                "azure_subscription",
+                nb_tenant,
+                nb_tenant.name,
+                self.config["azure_zabbix_hostid_cf"],
+                result="pending" if selected else "excluded_by_filter",
+                reason=None
+                if selected
+                else "Does not match the configured Azure tenant tag filter.",
+            )
+            report_keys_by_label[label] = key
+
         netbox_site_groups = convert_recordset(self.netbox.dcim.site_groups.all())
         netbox_regions = convert_recordset(self.netbox.dcim.regions.all())
         netbox_journals = self.netbox.extras.journal_entries
@@ -1011,16 +1346,25 @@ class Sync:
         zabbix_proxy_list = proxy_prepper(zabbix_proxies, zabbix_proxygroups)
 
         for nb_tenant in netbox_azure_subscriptions:
-            with suppress(SyncError):
-                self._process_azure_subscription(
+            label = self._summary_label("Azure subscription", nb_tenant.name)
+            key = report_keys_by_label[label]
+            try:
+                outcome, reason = self._process_azure_subscription(
                     nb_tenant,
                     zabbix_groups,
                     zabbix_templates,
+                    status_report,
+                    key,
                 )
+            except SyncError as error:
+                status_report.set_result(key, "failed", self._sync_error_reason(error))
+            else:
+                status_report.set_result(key, outcome, reason)
 
         # Go through all NetBox VMs.
         for nb_vm in netbox_vms:
             summary_label = self._summary_label("VM", nb_vm.name)
+            report_key = report_keys_by_label[summary_label]
             try:
                 self._process_vm_like(
                     nb_vm,
@@ -1033,14 +1377,20 @@ class Sync:
                     zabbix_proxy_list,
                     summary,
                     summary_label,
+                    status_report,
+                    report_key,
                 )
             except SyncError as error:
                 self._record_sync_error(summary, summary_label, error)
+            self._apply_summary_outcome(
+                status_report, report_key, summary, summary_label
+            )
 
         for nb_cluster in netbox_ontap_clusters:
             if not self._is_ontap_cluster(nb_cluster):
                 continue
             summary_label = self._summary_label("ONTAP cluster", nb_cluster.name)
+            report_key = report_keys_by_label[summary_label]
             try:
                 cluster_import = NetboxClusterImport(
                     nb_cluster,
@@ -1058,9 +1408,14 @@ class Sync:
                     zabbix_proxy_list,
                     summary,
                     summary_label,
+                    status_report,
+                    report_key,
                 )
             except SyncError as error:
                 self._record_sync_error(summary, summary_label, error)
+            self._apply_summary_outcome(
+                status_report, report_key, summary, summary_label
+            )
 
         for nb_device in netbox_devices:
             for (
@@ -1069,6 +1424,7 @@ class Sync:
                 split_import,
                 summary_label,
             ) in self._get_device_imports(nb_device, summary):
+                report_key = report_keys_by_label[summary_label]
                 try:
                     self._process_device(
                         device_import,
@@ -1081,10 +1437,60 @@ class Sync:
                         zabbix_proxy_list,
                         summary,
                         summary_label,
+                        status_report,
+                        report_key,
                         split_import=split_import,
                     )
                 except SyncError as error:
                     self._record_sync_error(summary, summary_label, error)
-        self._cleanup_deleted_hosts()
+                self._apply_summary_outcome(
+                    status_report, report_key, summary, summary_label
+                )
+            config_context = getattr(nb_device, "config_context", None)
+            zabbix_context = (
+                config_context.get("zabbix", {})
+                if isinstance(config_context, dict)
+                else {}
+            )
+            if isinstance(zabbix_context, dict):
+                oob_context = zabbix_context.get("oob")
+                if oob_context is not None:
+                    oob_name = (
+                        self._build_oob_hostname(nb_device.name, oob_context)
+                        if isinstance(oob_context, dict)
+                        else nb_device.name
+                    )
+                    oob_label = self._summary_label("Device OOB", oob_name)
+                    oob_key = report_keys_by_label.get(oob_label)
+                    if oob_key is not None:
+                        self._apply_summary_outcome(
+                            status_report, oob_key, summary, oob_label
+                        )
+
+        cleanup_summary = self._cleanup_deleted_hosts()
+        if cleanup_summary is not None:
+            for target in cleanup_summary.removed_targets:
+                key = status_report.add_target(
+                    target_type=target["source_type"].replace("-", "_"),
+                    name=target["name"],
+                    netbox_id=target["source_id"],
+                    zabbix_hostid=target["hostid"],
+                    sync_result="removed",
+                    reason="Removed by deleted-source cleanup.",
+                )
+                status_report.set_zabbix_status(key, None)
+            for target in cleanup_summary.failure_targets:
+                key = status_report.add_target(
+                    target_type=target["source_type"].replace("-", "_"),
+                    name=target["name"],
+                    netbox_id=target["source_id"],
+                    zabbix_hostid=target["hostid"],
+                    sync_result="failed",
+                    reason="Deleted-source cleanup failed.",
+                )
+                status_report.set_zabbix_status(
+                    key, target["status"], target["interfaces"]
+                )
+        self._write_status_report(status_report)
         summary.log(logger)
         return True
