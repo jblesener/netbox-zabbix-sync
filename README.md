@@ -1223,9 +1223,11 @@ environment. For example, you could:
 ##### Multiple interfaces
 
 The existing `interface_type`, `interface_port`, and `snmp` settings define the
-primary interface. Add `additional_interfaces` under `zabbix` to configure further
-interfaces for the same Zabbix host. For example, a Linux host can keep SNMP as its
-primary interface and also expose a Zabbix agent interface:
+primary interface. By default it uses the NetBox device or VM primary IP; set `ip`
+directly under `zabbix` to override that address. An IP-less VM with this override
+will also get a primary interface. Add `additional_interfaces` under `zabbix`
+to configure further interfaces for the same Zabbix host. For example, a Linux host
+can keep SNMP as its primary interface and also expose a Zabbix agent interface:
 
 ```json
 {

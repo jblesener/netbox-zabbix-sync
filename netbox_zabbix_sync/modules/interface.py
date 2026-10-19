@@ -159,9 +159,10 @@ class ZabbixInterface:
             )
         self.interface["port"] = str(port)
 
+        if "ip" in options and not isinstance(options["ip"], str):
+            raise InterfaceConfigError("Interface ip must be a string.")
+
         if additional:
-            if "ip" in options and not isinstance(options["ip"], str):
-                raise InterfaceConfigError("Interface ip must be a string.")
             if "dns" in options and not isinstance(options["dns"], str):
                 raise InterfaceConfigError("Interface dns must be a string.")
             self.interface["ip"] = options.get("ip", self.ip) or ""
@@ -182,6 +183,9 @@ class ZabbixInterface:
             self.set_snmp()
         elif interface_type == SNMP_INTERFACE_TYPE:
             self.set_default_snmp()
+
+        if not additional and "ip" in options:
+            self.interface["ip"] = options["ip"]
 
         if self.interface["useip"] == "1" and (
             not isinstance(self.interface["ip"], str)
@@ -216,7 +220,9 @@ class ZabbixInterface:
 
         interfaces = []
         if include_primary:
-            primary_options = zabbix if "interface_type" in zabbix else {}
+            primary_options = (
+                zabbix if "interface_type" in zabbix or "ip" in zabbix else {}
+            )
             primary = cls(context, ip)
             primary._configure(primary_options, default_type, additional=False)
             interfaces.append(primary.interface)

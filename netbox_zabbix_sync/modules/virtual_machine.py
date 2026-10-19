@@ -1,5 +1,7 @@
 """Module that hosts all functions for virtual machine processing"""
 
+from collections.abc import Mapping
+
 from netbox_zabbix_sync.modules.device import PhysicalDevice
 from netbox_zabbix_sync.modules.exceptions import TemplateError
 
@@ -44,6 +46,11 @@ class VirtualMachine(PhysicalDevice):
         Overwrites device function to select an agent interface type by default
         Agent type interfaces are more likely to be used with VMs then SNMP
         """
+        context = getattr(self.nb, "config_context", None)
+        zabbix_context = (
+            context.get("zabbix", {}) if isinstance(context, Mapping) else {}
+        )
+        has_ip_override = isinstance(zabbix_context, Mapping) and "ip" in zabbix_context
         return self._build_interface_details(
-            default_type=1, include_primary=bool(self.ip)
+            default_type=1, include_primary=bool(self.ip) or has_ip_override
         )

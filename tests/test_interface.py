@@ -280,6 +280,18 @@ class TestZabbixInterface(unittest.TestCase):
             ],
         )
 
+    def test_primary_interface_ip_can_be_overridden(self):
+        """The primary interface can use an IP other than the NetBox primary IP."""
+        context = {"zabbix": {"ip": "192.0.2.20"}}
+
+        interfaces = ZabbixInterface.build_interfaces(
+            context, self.test_ip, default_type=2
+        )
+
+        self.assertEqual(interfaces[0]["ip"], "192.0.2.20")
+        self.assertEqual(interfaces[0]["type"], "2")
+        self.assertEqual(interfaces[0]["details"]["version"], "2")
+
     def test_additional_interfaces_default_main_once_per_type(self):
         """Only the first interface of each type defaults to main."""
         context = {
@@ -378,3 +390,10 @@ class TestZabbixInterface(unittest.TestCase):
         for context in invalid_contexts:
             with self.subTest(context=context), self.assertRaises(InterfaceConfigError):
                 ZabbixInterface.build_interfaces(context, self.test_ip, default_type=2)
+
+    def test_rejects_non_string_primary_ip(self):
+        """Primary interface IP overrides must be strings."""
+        context = {"zabbix": {"ip": 192}}
+
+        with self.assertRaises(InterfaceConfigError):
+            ZabbixInterface.build_interfaces(context, self.test_ip, default_type=2)

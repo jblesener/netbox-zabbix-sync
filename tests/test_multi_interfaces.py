@@ -100,6 +100,17 @@ def test_ipless_vm_builds_only_explicitly_addressed_additional_interfaces():
     assert interfaces[0]["type"] == 1
 
 
+def test_ipless_vm_builds_primary_interface_from_explicit_ip_override():
+    context = {"zabbix": {"ip": "192.0.2.20"}}
+    vm = build_host_object(context, primary_ip=None, host_class=VirtualMachine)
+
+    interfaces = vm.set_interface_details()
+
+    assert len(interfaces) == 1
+    assert interfaces[0]["ip"] == "192.0.2.20"
+    assert interfaces[0]["type"] == "1"
+
+
 def test_vm_primary_agent_interface_retains_legacy_default():
     vm = build_host_object(host_class=VirtualMachine)
 
