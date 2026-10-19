@@ -749,6 +749,13 @@ class Sync:
         vm.set_tags()
         vm.set_tls()
         logger.debug("Host %s NetBox data: %s", vm.name, pformat(dict(nb_object)))
+        if source_type == "vm" and vm.repair_vmware_vm_lld_host_link() is False:
+            summary.record(
+                summary_label,
+                "VMware LLD host link is not configured for safe dual-host sync",
+                intentional=True,
+            )
+            return
         if vm.status in self.config["zabbix_device_removal"]:
             if vm.zabbix_id:
                 vm.cleanup()
@@ -768,13 +775,6 @@ class Sync:
             return
         if vm.status in self.config["zabbix_device_disable"]:
             vm.zabbix_state = 1
-        if source_type == "vm" and vm.repair_vmware_vm_lld_host_link() is False:
-            summary.record(
-                summary_label,
-                "VMware LLD host link is not configured for safe dual-host sync",
-                intentional=True,
-            )
-            return
         host_consistent = False
         if vm.zabbix_id:
             host_consistent = vm.consistency_check(

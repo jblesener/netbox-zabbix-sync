@@ -764,7 +764,9 @@ class PhysicalDevice:
                 return True
         return False
 
-    def _find_unique_existing_zabbix_host(self, exclude_hostid=None):
+    def _find_unique_existing_zabbix_host(
+        self, exclude_hostid=None, *, exclude_discovered=False
+    ):
         """Return one existing host matched by name, or ``None`` when unsafe."""
         matches = {}
         try:
@@ -807,6 +809,12 @@ class PhysicalDevice:
 
         if exclude_hostid is not None:
             matches.pop(str(exclude_hostid), None)
+        if exclude_discovered:
+            matches = {
+                hostid: host
+                for hostid, host in matches.items()
+                if not self._is_discovered_host(host)
+            }
         if not matches:
             self.logger.debug(
                 "Host %s: No existing Zabbix host matched for adoption.", self.name
@@ -931,18 +939,15 @@ class PhysicalDevice:
 
         Returns True when adoption succeeded, otherwise False.
         """
-        if (
-            self.zabbix_id
-            or not self._is_adoption_candidate()
-            or self._uses_lld_dual_host_mode()
-        ):
+        if self.zabbix_id or not self._is_adoption_candidate():
             return False
-        host = self._find_unique_existing_zabbix_host()
+        dual_host_mode = self._uses_lld_dual_host_mode()
+        host = self._find_unique_existing_zabbix_host(exclude_discovered=dual_host_mode)
         if not host:
             return False
-        if self._is_vmware_vm() and self._is_discovered_host(host):
+        if self._is_discovered_host(host) and (dual_host_mode or self._is_vmware_vm()):
             self.logger.warning(
-                "Host %s: Matched Zabbix host %s is VMware LLD-created; "
+                "Host %s: Matched Zabbix host %s is LLD-created; "
                 "it will not be adopted as the primary managed host.",
                 self.name,
                 host["hostid"],
