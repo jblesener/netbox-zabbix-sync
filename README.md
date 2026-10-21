@@ -215,6 +215,13 @@ Use the `config.py` file and set the `sync_vms` variable to `True`.
 You can set the `vm_hostgroup_format` variable to a customizable value for VM
 hostgroups. The default is `cluster_type/cluster/role`.
 
+If that format produces no group for a VM (for example, because the VM has no
+site), the sync uses `vm_hostgroup_fallback`, which defaults to `MissingGroup`.
+Set this option in `config.py`, through `NBZX_VM_HOSTGROUP_FALLBACK`, or with
+`--vm-hostgroup-fallback` to choose a different group. The fallback group is
+created only when `create_hostgroups` is enabled; otherwise it must already
+exist in Zabbix.
+
 To enable filtering for VM's, check the `nb_vm_filter` variable out. It works
 the same as with the device filter (see documentation under "Hostgroup layout").
 Note that not all filtering capabilities and properties of devices are

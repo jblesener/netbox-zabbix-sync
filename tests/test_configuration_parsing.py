@@ -28,6 +28,7 @@ def test_load_config_defaults():
         assert config == DEFAULT_CONFIG
         assert config["templates_config_context"] is False
         assert config["create_hostgroups"] is True
+        assert config["vm_hostgroup_fallback"] == "MissingGroup"
         # TLS settings default to disabled / no encryption
         assert config["tls_sync"] is False
         assert config["tls_connect"] == "none"
@@ -213,6 +214,16 @@ def test_cleanup_options_can_be_overridden_on_the_cli():
 
     assert result["cleanup_deleted_hosts"] is True
     assert result["cleanup_instance_id"] == "deployment-a"
+
+
+def test_vm_hostgroup_fallback_can_be_overridden_on_the_cli():
+    config = DEFAULT_CONFIG.copy()
+
+    result = _apply_cli_overrides(
+        config, Namespace(vm_hostgroup_fallback="VMs/Unassigned")
+    )
+
+    assert result["vm_hostgroup_fallback"] == "VMs/Unassigned"
 
 
 def test_stale_hostid_cleanup_can_be_overridden_on_the_cli():

@@ -2213,6 +2213,87 @@ class TestVMStatusHandling(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_site_less_vm_with_additional_interface_uses_fallback_group(
+        self, mock_api, mock_zabbix_api
+    ):
+        vm = MockNetboxVM(
+            name="site-less-vm",
+            config_context={
+                "zabbix": {
+                    "templates": ["TestTemplate"],
+                    "additional_interfaces": [{"interface_type": 1, "ip": "127.0.0.1"}],
+                }
+            },
+        )
+        vm.site = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+
+        syncer = Sync(
+            {
+                **self._SYNC_CFG,
+                "vm_hostgroup_format": "site",
+                "vm_hostgroup_fallback": "VMWithoutSite",
+            }
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.hostgroup.create.assert_called_once_with(name="VMWithoutSite")
+        create_kwargs = mock_zabbix.host.create.call_args.kwargs
+        self.assertEqual(create_kwargs["groups"], [{"groupid": "2"}])
+        self.assertEqual(
+            [interface["ip"] for interface in create_kwargs["interfaces"]],
+            ["192.168.1.1", "127.0.0.1"],
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_linked_site_less_vm_uses_existing_fallback_group(
+        self, mock_api, mock_zabbix_api
+    ):
+        vm = MockNetboxVM(name="site-less-linked-vm", zabbix_hostid=42)
+        vm.site = None
+        self._setup_netbox_mock(mock_api, vms=[vm])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.hostgroup.get.return_value = [
+            {"groupid": "2", "name": "MissingGroup"}
+        ]
+        host = self._make_zabbix_host(hostname="site-less-linked-vm", status="0")
+        host[0]["hostgroups"] = [{"groupid": "2"}]
+        host[0]["groups"] = [{"groupid": "2"}]
+        mock_zabbix.host.get.return_value = host
+
+        syncer = Sync({**self._SYNC_CFG, "vm_hostgroup_format": "site"})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        assert syncer.last_unsynced_summary is not None
+        assert syncer.last_status_report is not None
+        self.assertEqual(syncer.last_unsynced_summary.failures, {})
+        self.assertEqual(
+            syncer.last_status_report.document()["targets"][0]["sync_result"],
+            "synced",
+        )
+        mock_zabbix.hostgroup.create.assert_not_called()
+        mock_zabbix.host.update.assert_not_called()
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
     def test_ipless_vm_is_created_without_interfaces(self, mock_api, mock_zabbix_api):
         """An IP-less VM can be created for interface-free checks such as HTTP."""
         vm = MockNetboxVM(

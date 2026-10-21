@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "azure_vm_discovered_templates": ["Azure Virtual Machine by HTTP"],
     "azure_vm_resource_id_cf": "",
     "vm_hostgroup_format": "cluster_type/cluster/role",
+    "vm_hostgroup_fallback": "MissingGroup",
     "adopt_existing_hosts": False,
     "adopt_scope": "esxi",
     "adopt_for_vms": True,

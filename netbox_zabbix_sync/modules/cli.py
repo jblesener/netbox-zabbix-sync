@@ -85,6 +85,11 @@ _STR_ARGS = [
         "Hostgroup path pattern for virtual machines (e.g. cluster_type/cluster/role).",
         "PATTERN",
     ),
+    (
+        "vm_hostgroup_fallback",
+        "Fallback hostgroup for VMs when the configured format produces no groups.",
+        "GROUP",
+    ),
     ("azure_tag", "NetBox tag used to select Azure Tenants.", "TAG"),
     (
         "azure_subscription_id_cf",

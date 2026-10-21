@@ -21,7 +21,7 @@ from netbox_zabbix_sync.modules.device import (
     NetboxDeviceImport,
     PhysicalDevice,
 )
-from netbox_zabbix_sync.modules.exceptions import SyncError
+from netbox_zabbix_sync.modules.exceptions import SyncError, SyncInventoryError
 from netbox_zabbix_sync.modules.logging import get_logger
 from netbox_zabbix_sync.modules.settings import DEFAULT_CONFIG
 from netbox_zabbix_sync.modules.status_report import SyncStatusReport
@@ -737,9 +737,23 @@ class Sync:
             return
 
         def resolve_hostgroups():
-            return vm.set_hostgroup(
+            if vm.set_hostgroup(
                 self.config["vm_hostgroup_format"], netbox_site_groups, netbox_regions
+            ):
+                return True
+            fallback_group = self.config["vm_hostgroup_fallback"]
+            if not isinstance(fallback_group, str) or not fallback_group.strip():
+                raise SyncInventoryError(
+                    "vm_hostgroup_fallback must be a non-empty string."
+                )
+            vm.hostgroups = [fallback_group]
+            logger.warning(
+                "Host %s: VM hostgroup format produced no groups; using fallback "
+                "hostgroup '%s'.",
+                vm.name,
+                fallback_group,
             )
+            return True
 
         if self.config["extended_site_properties"] and nb_object.site:
             logger.debug("Host %s: extending site information.", vm.name)
