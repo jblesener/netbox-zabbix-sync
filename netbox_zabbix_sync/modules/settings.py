@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "clustering": False,
     "create_hostgroups": True,
     "create_journal": False,
+    "sync_status_instance_id": "",
     "sync_vms": False,
     "sync_ontap_clusters": False,
     "nb_ontap_cluster_filter": {"name__n": "null"},

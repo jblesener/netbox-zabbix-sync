@@ -65,6 +65,27 @@ excluded by configured filters, plus sync skips, failures, and removals.
 Categories disabled by configuration are not scanned for the report. A
 report-write error is logged but does not fail an otherwise completed sync; if
 that happens, the previous report remains in place.
+
+Sync outcomes are also recorded on the source record as NetBox journal entries
+for devices (including OOB imports), VMs, ONTAP clusters, and Azure subscription
+Tenants. A new entry is added only when the previous status for that target and
+Zabbix instance differs: repeated successes or failures with the same reason do
+not add duplicate entries. Entries record successful or failed attempted syncs;
+skipped, removed, and filter-excluded targets are not journaled. Journal lookup
+or write errors are logged without stopping the Zabbix sync. The NetBox token
+must be allowed to read and create journal entries.
+
+The Zabbix endpoint from `ZABBIX_HOST` identifies the instance by default. Set
+`sync_status_instance_id` to a stable, unique label if multiple sync processes
+use different Zabbix instances through endpoint aliases:
+
+```python
+sync_status_instance_id = "zabbix-production"
+```
+
+The same setting can be provided through `NBZX_SYNC_STATUS_INSTANCE_ID` or the
+`--sync-status-instance-id` command-line option.
+
 The image uses the default `config.py` for its configuration, you can use a
 volume mount in the docker run command to override with your own config file if
 needed (see [config file](#config-file)):

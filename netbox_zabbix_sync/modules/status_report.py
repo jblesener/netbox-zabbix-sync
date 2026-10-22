@@ -174,6 +174,14 @@ class SyncStatusReport:
             if target["sync_result"] == result
         ]
 
+    def targets_with_source_records(self) -> list[tuple[dict[str, Any], Any]]:
+        """Return targets that are linked to their original NetBox records."""
+        return [
+            (target, source[0])
+            for key, target in self._targets.items()
+            if (source := self._source_records.get(key)) is not None
+        ]
+
     def targets_missing_status(self) -> list[tuple[tuple[str, str, str], dict]]:
         return [
             (key, target)

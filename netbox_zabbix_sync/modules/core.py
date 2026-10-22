@@ -7,6 +7,7 @@ from pathlib import Path
 from pprint import pformat
 from re import fullmatch
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from pynetbox import api as nbapi
 from pynetbox.core.query import RequestError as NetBoxRequestError
@@ -24,6 +25,7 @@ from netbox_zabbix_sync.modules.device import (
 from netbox_zabbix_sync.modules.exceptions import SyncError, SyncInventoryError
 from netbox_zabbix_sync.modules.logging import get_logger
 from netbox_zabbix_sync.modules.settings import DEFAULT_CONFIG
+from netbox_zabbix_sync.modules.status_journal import SyncStatusJournal
 from netbox_zabbix_sync.modules.status_report import SyncStatusReport
 from netbox_zabbix_sync.modules.tools import (
     convert_recordset,
@@ -132,6 +134,7 @@ class Sync:
         """
         self.netbox = None
         self.zabbix = None
+        self.zabbix_host = None
         self.nb_version = None
 
         default_config = DEFAULT_CONFIG.copy()
@@ -410,10 +413,49 @@ class Sync:
 
     def _write_status_report(self, report):
         self._collect_report_zabbix_status(report)
+        instance_id = self._sync_status_instance_id()
+        if instance_id is None:
+            logger.error(
+                "Unable to write sync-status journals: configure "
+                "sync_status_instance_id or connect with a Zabbix endpoint."
+            )
+        else:
+            SyncStatusJournal(
+                cast(Any, self.netbox).extras.journal_entries,
+                instance_id,
+                logger,
+            ).write(report)
         try:
             report.write(Path.cwd() / "sync-status.json")
         except (OSError, TypeError, ValueError) as error:
             logger.error("Unable to write sync-status.json: %s", error)
+
+    def _sync_status_instance_id(self) -> str | None:
+        """Return the configured status-journal label or sanitized Zabbix endpoint."""
+        configured_id = self.config.get("sync_status_instance_id")
+        if configured_id:
+            normalized_id = " ".join(str(configured_id).split())
+            return normalized_id or None
+
+        if not self.zabbix_host:
+            return None
+        endpoint = str(self.zabbix_host).strip()
+        if not endpoint:
+            return None
+        parsed = urlsplit(endpoint)
+        if not parsed.hostname:
+            parsed = urlsplit(f"//{endpoint.lstrip('/')}")
+        hostname = parsed.hostname
+        if not hostname:
+            return None
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        netloc = hostname.casefold()
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit(
+            (parsed.scheme.casefold(), netloc, parsed.path.rstrip("/"), "", "")
+        )
 
     def _cleanup_deleted_hosts(self):
         """Remove only this deployment's marked hosts whose NetBox source vanished."""
@@ -1124,6 +1166,7 @@ class Sync:
         :param zbx_pass: Description
         :param zbx_token: Description
         """
+        self.zabbix_host = zbx_host
         # Initialize Netbox API connection
         netbox = nbapi(nb_host, token=nb_token, threading=True)
         try:

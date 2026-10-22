@@ -28,6 +28,7 @@ def test_load_config_defaults():
         assert config == DEFAULT_CONFIG
         assert config["templates_config_context"] is False
         assert config["create_hostgroups"] is True
+        assert config["sync_status_instance_id"] == ""
         assert config["vm_hostgroup_fallback"] == "MissingGroup"
         # TLS settings default to disabled / no encryption
         assert config["tls_sync"] is False
@@ -214,6 +215,16 @@ def test_cleanup_options_can_be_overridden_on_the_cli():
 
     assert result["cleanup_deleted_hosts"] is True
     assert result["cleanup_instance_id"] == "deployment-a"
+
+
+def test_sync_status_instance_id_can_be_overridden_on_the_cli():
+    config = DEFAULT_CONFIG.copy()
+
+    result = _apply_cli_overrides(
+        config, Namespace(sync_status_instance_id="zabbix-production")
+    )
+
+    assert result["sync_status_instance_id"] == "zabbix-production"
 
 
 def test_vm_hostgroup_fallback_can_be_overridden_on_the_cli():

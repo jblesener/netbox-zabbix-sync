@@ -69,6 +69,11 @@ _BOOL_ARGS = [
 # String settings that can be set via --option VALUE
 _STR_ARGS = [
     ("template_cf", "NetBox custom field name for the Zabbix template.", "FIELD"),
+    (
+        "sync_status_instance_id",
+        "Unique label for this Zabbix instance's NetBox sync-status journals.",
+        "ID",
+    ),
     ("device_cf", "NetBox custom field name for the Zabbix host ID.", "FIELD"),
     (
         "oob_device_cf",
