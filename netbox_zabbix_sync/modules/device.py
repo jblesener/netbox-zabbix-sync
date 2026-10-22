@@ -1358,6 +1358,94 @@ class PhysicalDevice:
                 return False
         return True
 
+    @staticmethod
+    def _interface_update_payload(interface):
+        """Return only writable interface fields for a retained interface."""
+        fields = (
+            "interfaceid",
+            "type",
+            "main",
+            "useip",
+            "ip",
+            "dns",
+            "port",
+            "details",
+        )
+        return {key: interface[key] for key in fields if key in interface}
+
+    def _refresh_zabbix_interfaces(self):
+        """Fetch the current interface IDs after adding transition interfaces."""
+        try:
+            hosts = self.zabbix.host.get(
+                filter={"hostid": self.zabbix_id},
+                selectInterfaces=[
+                    "type",
+                    "ip",
+                    "dns",
+                    "port",
+                    "useip",
+                    "main",
+                    "details",
+                    "interfaceid",
+                    "available",
+                ],
+            )
+        except APIRequestError as error:
+            message = (
+                f"Host {self.name}: Unable to refresh Zabbix interfaces. "
+                f"Zabbix returned the following error: {error}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from error
+        if (
+            not isinstance(hosts, list)
+            or len(hosts) != 1
+            or not isinstance(hosts[0], Mapping)
+            or not isinstance(hosts[0].get("interfaces"), list)
+        ):
+            message = (
+                f"Host {self.name}: Zabbix returned an invalid interface response "
+                "after adding transition interfaces."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message)
+        return hosts[0]["interfaces"]
+
+    def _add_missing_interface_types(self, host, desired_interfaces):
+        """Add new interface types without removing interfaces used by old templates."""
+        current_interfaces = host.get("interfaces") or []
+        current_types = {
+            self._interface_value(interface, "type") for interface in current_interfaces
+        }
+        missing_types = {
+            self._interface_value(interface, "type")
+            for interface in desired_interfaces
+            if self._interface_value(interface, "type") not in current_types
+        }
+        if not missing_types:
+            return False
+
+        current_payload = []
+        for interface in current_interfaces:
+            if interface.get("interfaceid") is None:
+                message = (
+                    f"Host {self.name}: Cannot stage an interface type change because "
+                    "Zabbix did not return an ID for an existing interface."
+                )
+                self.logger.error(message)
+                raise SyncInventoryError(message)
+            current_payload.append(self._interface_update_payload(interface))
+
+        desired_payload = [
+            {**interface, "hostid": self.zabbix_id}
+            for interface in desired_interfaces
+            if self._interface_value(interface, "type") in missing_types
+        ]
+        self.update_zabbix_host(interfaces=current_payload + desired_payload)
+        host["interfaces"] = self._refresh_zabbix_interfaces()
+        self.zabbix_interfaces = host["interfaces"]
+        return True
+
     def _reconcile_interfaces(self, host, desired_interfaces):
         """Replace the host interface list, retaining IDs for matching entries."""
         current_interfaces = host.get("interfaces") or []
@@ -1907,6 +1995,7 @@ class PhysicalDevice:
         if full_sync:
             self._set_proxy(proxies)
 
+        desired_interfaces = None
         if full_sync:
             if host["host"] == self.name:
                 self.logger.debug("Host %s: Hostname in-sync.", self.name)
@@ -1931,7 +2020,10 @@ class PhysicalDevice:
                     self.update_zabbix_host(name=self.visible_name)
 
             # Check if the templates are in-sync
-            if not self.zbx_template_comparer(host["parentTemplates"]):
+            templates_in_sync = self.zbx_template_comparer(host["parentTemplates"])
+            if not templates_in_sync:
+                desired_interfaces = self.set_interface_details()
+                self._add_missing_interface_types(host, desired_interfaces)
                 self.logger.info("Host %s: Template(s) OUT of sync.", self.name)
                 # Prepare Templates for API parsing
                 templateids = []
@@ -2111,7 +2203,8 @@ class PhysicalDevice:
             self._sync_cleanup_ownership(host)
 
         if full_sync:
-            desired_interfaces = self.set_interface_details()
+            if desired_interfaces is None:
+                desired_interfaces = self.set_interface_details()
             self._reconcile_interfaces(host, desired_interfaces)
         return True
 

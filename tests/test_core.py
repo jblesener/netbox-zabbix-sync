@@ -15,6 +15,7 @@ from netbox_zabbix_sync.modules.core import Sync, UnsyncedSummary, logger
 from netbox_zabbix_sync.modules.exceptions import SyncError
 
 SNMP_INTERFACE_TYPE = 2
+AGENT_INTERFACE_TYPE = 1
 
 
 class MockListObject:
@@ -1926,6 +1927,162 @@ class TestDeviceStatusHandling(unittest.TestCase):
             templates_clear=[{"templateid": "2"}],
             templates=[{"templateid": "1"}],
         )
+
+    def _run_interface_template_transition(
+        self,
+        mock_api,
+        mock_zabbix_api,
+        *,
+        current_type,
+        desired_type,
+        template_name,
+        update_side_effect=None,
+    ):
+        """Run one full sync where both the interface type and template change."""
+        context = {
+            "interface_type": desired_type,
+            "templates": [template_name],
+        }
+        if desired_type == SNMP_INTERFACE_TYPE:
+            context["snmp"] = {"version": 2}
+        device = MockNetboxDevice(
+            name="linux-host",
+            status_label="Active",
+            zabbix_hostid=42,
+            config_context={"zabbix": context},
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.template.get.return_value = [
+            {"templateid": "1", "name": template_name}
+        ]
+
+        host = self._make_zabbix_host(hostname="linux-host", status="0")[0]
+        current_interface = host["interfaces"][0]
+        current_interface["type"] = str(current_type)
+        current_interface["port"] = (
+            "161" if current_type == SNMP_INTERFACE_TYPE else "10050"
+        )
+        current_interface["available"] = "1"
+        if current_type == AGENT_INTERFACE_TYPE:
+            current_interface.pop("details", None)
+        host["parentTemplates"] = [{"templateid": "2", "link_type": "0"}]
+        staged_interface = {
+            "interfaceid": "2",
+            "main": "1",
+            "useip": "1",
+            "dns": "",
+            "ip": "192.168.1.1",
+            "type": str(desired_type),
+            "port": "161" if desired_type == SNMP_INTERFACE_TYPE else "10050",
+            "available": "1",
+        }
+        if desired_type == SNMP_INTERFACE_TYPE:
+            staged_interface["details"] = {
+                "version": "2",
+                "community": "{$SNMP_COMMUNITY}",
+                "bulk": "1",
+            }
+        staged_host = {**host, "interfaces": [*host["interfaces"], staged_interface]}
+        mock_zabbix.host.get.side_effect = [[host], [staged_host]]
+        if update_side_effect is not None:
+            mock_zabbix.host.update.side_effect = update_side_effect
+
+        syncer = Sync({"templates_config_context": True})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+        return mock_zabbix
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_interface_is_added_before_dependent_template(
+        self, mock_api, mock_zabbix_api
+    ):
+        """The new SNMP interface exists before an SNMP template is linked."""
+        mock_zabbix = self._run_interface_template_transition(
+            mock_api,
+            mock_zabbix_api,
+            current_type=AGENT_INTERFACE_TYPE,
+            desired_type=SNMP_INTERFACE_TYPE,
+            template_name="Linux by SNMP",
+        )
+
+        updates = mock_zabbix.host.update.call_args_list
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(
+            [str(interface["type"]) for interface in updates[0].kwargs["interfaces"]],
+            ["1", "2"],
+        )
+        self.assertNotIn("available", updates[0].kwargs["interfaces"][0])
+        self.assertIn("templates", updates[1].kwargs)
+        self.assertNotIn("interfaces", updates[1].kwargs)
+        self.assertEqual(
+            [str(interface["type"]) for interface in updates[2].kwargs["interfaces"]],
+            ["2"],
+        )
+        self.assertEqual(
+            updates[2].kwargs["interfaces"][0]["interfaceid"],
+            "2",
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_old_interface_is_removed_after_dependent_template(
+        self, mock_api, mock_zabbix_api
+    ):
+        """An SNMP interface remains until the SNMP template has been unlinked."""
+        mock_zabbix = self._run_interface_template_transition(
+            mock_api,
+            mock_zabbix_api,
+            current_type=SNMP_INTERFACE_TYPE,
+            desired_type=AGENT_INTERFACE_TYPE,
+            template_name="Linux by Agent",
+        )
+
+        updates = mock_zabbix.host.update.call_args_list
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(
+            [str(interface["type"]) for interface in updates[0].kwargs["interfaces"]],
+            ["2", "1"],
+        )
+        self.assertIn("templates_clear", updates[1].kwargs)
+        self.assertNotIn("interfaces", updates[1].kwargs)
+        self.assertEqual(
+            [str(interface["type"]) for interface in updates[2].kwargs["interfaces"]],
+            ["1"],
+        )
+        self.assertEqual(
+            updates[2].kwargs["interfaces"][0]["interfaceid"],
+            "2",
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_interface_cleanup_stops_when_template_update_fails(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Do not remove the old interface if the dependent template update fails."""
+        mock_zabbix = self._run_interface_template_transition(
+            mock_api,
+            mock_zabbix_api,
+            current_type=SNMP_INTERFACE_TYPE,
+            desired_type=AGENT_INTERFACE_TYPE,
+            template_name="Linux by Agent",
+            update_side_effect=[None, APIRequestError("template update failed")],
+        )
+
+        updates = mock_zabbix.host.update.call_args_list
+        self.assertEqual(len(updates), 2)
+        self.assertIn("interfaces", updates[0].kwargs)
+        self.assertIn("templates_clear", updates[1].kwargs)
+        self.assertNotIn("interfaces", updates[1].kwargs)
 
     # ------------------------------------------------------------------
     # Scenario 3: Staged device, not yet in Zabbix → created disabled (status=1)

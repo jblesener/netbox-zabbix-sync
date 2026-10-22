@@ -1190,8 +1190,12 @@ provided:
 
 Changing an interface type is handled by replacing the old interface rather than
 modifying its type in place. Interfaces of the same type retain their Zabbix IDs
-when possible. Zabbix may reject a replacement when linked templates or items
-depend on the old interface; such API failures are reported as host sync errors.
+when possible. When a full sync also changes templates, newly required interface
+types are added before templates are attached, and obsolete interfaces are
+removed after templates are updated. This allows interface and template changes
+to be made together in NetBox. Zabbix may still reject a replacement if a
+remaining linked template or item depends on the old interface; such API
+failures are reported as host sync errors.
 
 To configure the interface parameters you'll need to use custom context. Custom
 context was used to make this script as customizable as possible for each
