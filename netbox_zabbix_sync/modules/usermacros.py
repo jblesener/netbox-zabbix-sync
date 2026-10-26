@@ -108,6 +108,9 @@ class ZabbixUsermacros:
                 )
                 return None, False
 
+        if path == "primary_ip/address" and isinstance(value, str):
+            value = value.partition("/")[0]
+
         if (value and isinstance(value, int | float | str | list | dict)) or (
             isinstance(value, int | float) and int(value) == 0
         ):

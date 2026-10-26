@@ -281,18 +281,26 @@ class TestZabbixUsermacros(unittest.TestCase):
 
     def test_generate_expands_nested_netbox_path(self):
         config_context = {
-            "zabbix": {"usermacros": {"{$PRIMARY_IP}": "{netbox:primary_ip/address}"}}
+            "zabbix": {
+                "usermacros": {
+                    "{$ICMP.PING.TARGET}": {
+                        "type": "text",
+                        "value": "{netbox:primary_ip/address}",
+                    }
+                }
+            }
         }
         nb = DummyNB(
             config_context=config_context,
-            primary_ip=DummyNB(address="192.0.2.1/24"),
+            primary_ip=DummyNB(address="192.0.2.1/32"),
         )
         macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
 
         result = macros.generate()
 
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["value"], "192.0.2.1/24")
+        self.assertEqual(result[0]["macro"], "{$ICMP.PING.TARGET}")
+        self.assertEqual(result[0]["value"], "192.0.2.1")
 
     def test_generate_expands_custom_field_path(self):
         config_context = {
@@ -331,7 +339,7 @@ class TestZabbixUsermacros(unittest.TestCase):
         result = macros.generate()
 
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["value"], "server.company.com 192.0.2.1/24")
+        self.assertEqual(result[0]["value"], "server.company.com 192.0.2.1")
 
     def test_generate_empty_placeholder_value_expands_to_empty_string(self):
         config_context = {
