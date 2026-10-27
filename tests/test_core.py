@@ -1936,9 +1936,11 @@ class TestDeviceStatusHandling(unittest.TestCase):
         current_type,
         desired_type,
         template_name,
+        templates_in_sync=False,
+        linked_items=None,
         update_side_effect=None,
     ):
-        """Run one full sync where both the interface type and template change."""
+        """Run one full sync with an interface type change."""
         context = {
             "interface_type": desired_type,
             "templates": [template_name],
@@ -1966,7 +1968,12 @@ class TestDeviceStatusHandling(unittest.TestCase):
         current_interface["available"] = "1"
         if current_type == AGENT_INTERFACE_TYPE:
             current_interface.pop("details", None)
-        host["parentTemplates"] = [{"templateid": "2", "link_type": "0"}]
+        host["parentTemplates"] = [
+            {
+                "templateid": "1" if templates_in_sync else "2",
+                "link_type": "0",
+            }
+        ]
         staged_interface = {
             "interfaceid": "2",
             "main": "1",
@@ -1985,6 +1992,11 @@ class TestDeviceStatusHandling(unittest.TestCase):
             }
         staged_host = {**host, "interfaces": [*host["interfaces"], staged_interface]}
         mock_zabbix.host.get.side_effect = [[host], [staged_host]]
+        mock_zabbix.item.get.return_value = linked_items or []
+        if linked_items:
+            mock_zabbix.item.update.return_value = {
+                "itemids": [item["itemid"] for item in linked_items]
+            }
         if update_side_effect is not None:
             mock_zabbix.host.update.side_effect = update_side_effect
 
@@ -2061,6 +2073,59 @@ class TestDeviceStatusHandling(unittest.TestCase):
         self.assertEqual(
             updates[2].kwargs["interfaces"][0]["interfaceid"],
             "2",
+        )
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_interface_type_change_moves_linked_items_when_template_is_in_sync(
+        self, mock_api, mock_zabbix_api
+    ):
+        """Move linked items before removing the old interface without unlinking."""
+        mock_zabbix = self._run_interface_template_transition(
+            mock_api,
+            mock_zabbix_api,
+            current_type=SNMP_INTERFACE_TYPE,
+            desired_type=AGENT_INTERFACE_TYPE,
+            template_name="ICMP Ping Custom",
+            templates_in_sync=True,
+            linked_items=[{"itemid": "99"}],
+        )
+
+        updates = mock_zabbix.host.update.call_args_list
+        self.assertEqual(len(updates), 2)
+        self.assertEqual(
+            [str(interface["type"]) for interface in updates[0].kwargs["interfaces"]],
+            ["2", "1"],
+        )
+        self.assertNotIn("templates", updates[0].kwargs)
+        self.assertNotIn("templates_clear", updates[0].kwargs)
+        self.assertNotIn("templates", updates[1].kwargs)
+        self.assertNotIn("templates_clear", updates[1].kwargs)
+        self.assertEqual(
+            updates[1].kwargs["interfaces"],
+            [
+                {
+                    "interfaceid": "2",
+                    "main": "1",
+                    "useip": "1",
+                    "dns": "",
+                    "ip": "192.168.1.1",
+                    "type": AGENT_INTERFACE_TYPE,
+                    "port": "10050",
+                }
+            ],
+        )
+        mock_zabbix.item.get.assert_called_once_with(
+            hostids=[42], interfaceids=["1"], output=["itemid"]
+        )
+        mock_zabbix.item.update.assert_called_once_with(
+            [{"itemid": "99", "interfaceid": "2"}]
+        )
+        self.assertLess(
+            mock_zabbix.mock_calls.index(
+                call.item.update([{"itemid": "99", "interfaceid": "2"}])
+            ),
+            mock_zabbix.mock_calls.index(call.host.update(**updates[1].kwargs)),
         )
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")

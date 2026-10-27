@@ -1341,6 +1341,14 @@ class PhysicalDevice:
         )
 
     @classmethod
+    def _interfaces_have_same_address(cls, current, desired):
+        """Compare address fields when identifying an interrupted type transition."""
+        return all(
+            cls._interface_value(current, key) == cls._interface_value(desired, key)
+            for key in ("ip", "dns", "useip")
+        )
+
+    @classmethod
     def _interface_matches_desired(cls, current, desired):
         """Compare the NetBox-managed settings for one interface."""
         for key, value in desired.items():
@@ -1446,8 +1454,122 @@ class PhysicalDevice:
         self.zabbix_interfaces = host["interfaces"]
         return True
 
-    def _reconcile_interfaces(self, host, desired_interfaces):
-        """Replace the host interface list, retaining IDs for matching entries."""
+    def _move_items_to_interface(self, old_interface_id, new_interface_id):
+        """Move linked items before removing the interface they reference."""
+        try:
+            items = self.zabbix.item.get(
+                hostids=[self.zabbix_id],
+                interfaceids=[old_interface_id],
+                output=["itemid"],
+            )
+        except APIRequestError as error:
+            message = (
+                f"Host {self.name}: Unable to retrieve items linked to interface "
+                f"{old_interface_id} before changing interface type. "
+                f"Zabbix returned the following error: {error}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from error
+
+        if not isinstance(items, list) or any(
+            not isinstance(item, Mapping) or item.get("itemid") is None
+            for item in items
+        ):
+            message = (
+                f"Host {self.name}: Zabbix returned an invalid item response while "
+                f"preparing to remove interface {old_interface_id}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message)
+
+        if not items:
+            return
+
+        updates = [
+            {"itemid": item["itemid"], "interfaceid": new_interface_id}
+            for item in items
+        ]
+        try:
+            result = self.zabbix.item.update(updates)
+        except APIRequestError as error:
+            message = (
+                f"Host {self.name}: Unable to move items from interface "
+                f"{old_interface_id} to {new_interface_id} before removing the old "
+                f"interface. Zabbix returned the following error: {error}."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message) from error
+
+        expected_ids = {str(item["itemid"]) for item in items}
+        updated_ids = (
+            {str(itemid) for itemid in result["itemids"]}
+            if isinstance(result, Mapping) and isinstance(result.get("itemids"), list)
+            else set()
+        )
+        if updated_ids != expected_ids:
+            message = (
+                f"Host {self.name}: Zabbix did not confirm moving all items from "
+                f"interface {old_interface_id}; the old interface was retained."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message)
+
+    def _replace_interface_type(
+        self, host, old_interface, desired_interface, target_interface_index=None
+    ):
+        """Stage a replacement and move item references before removing the old type."""
+        old_interface_id = old_interface.get("interfaceid")
+        if old_interface_id is None:
+            message = (
+                f"Host {self.name}: Cannot replace an interface type because "
+                "Zabbix did not return an ID for the existing interface."
+            )
+            self.logger.error(message)
+            raise SyncInventoryError(message)
+
+        current_interfaces = host.get("interfaces") or []
+        current_ids = {
+            str(interface["interfaceid"])
+            for interface in current_interfaces
+            if interface.get("interfaceid") is not None
+        }
+
+        if target_interface_index is not None:
+            target_interface = current_interfaces[target_interface_index]
+            new_interface_id = target_interface.get("interfaceid")
+        else:
+            self._add_missing_interface_types(host, [desired_interface])
+            added_interfaces = [
+                interface
+                for interface in host.get("interfaces") or []
+                if self._interface_value(interface, "type")
+                == self._interface_value(desired_interface, "type")
+                and interface.get("interfaceid") is not None
+                and str(interface["interfaceid"]) not in current_ids
+            ]
+            if len(added_interfaces) != 1:
+                message = (
+                    f"Host {self.name}: Zabbix did not return exactly one new "
+                    "interface for the requested type change."
+                )
+                self.logger.error(message)
+                raise SyncExternalError(message)
+            new_interface_id = added_interfaces[0]["interfaceid"]
+
+        if new_interface_id is None:
+            message = (
+                f"Host {self.name}: Zabbix did not return an ID for the replacement "
+                "interface."
+            )
+            self.logger.error(message)
+            raise SyncExternalError(message)
+
+        self._move_items_to_interface(old_interface_id, new_interface_id)
+
+    def _reconcile_interfaces(
+        self, host, desired_interfaces, *, transfer_linked_items=True
+    ):
+        """Replace the host interface list, migrating linked items before type changes."""
         current_interfaces = host.get("interfaces") or []
         unmatched = set(range(len(current_interfaces)))
         matches = {}
@@ -1474,6 +1596,46 @@ class PhysicalDevice:
                 continue
             matches[desired_index] = match_index
             unmatched.remove(match_index)
+
+        unmatched_desired = [
+            index for index in range(len(desired_interfaces)) if index not in matches
+        ]
+        if transfer_linked_items and len(unmatched) == 1:
+            current_index = next(iter(unmatched))
+            current = current_interfaces[current_index]
+            current_type = self._interface_value(current, "type")
+            current_types = {
+                self._interface_value(interface, "type")
+                for interface in current_interfaces
+            }
+            replacement_candidates = []
+            if len(unmatched_desired) == 1:
+                desired_index = unmatched_desired[0]
+                if (
+                    self._interface_value(desired_interfaces[desired_index], "type")
+                    not in current_types
+                ):
+                    replacement_candidates.append(desired_index)
+            elif not unmatched_desired:
+                replacement_candidates = [
+                    index
+                    for index, desired in enumerate(desired_interfaces)
+                    if index in matches
+                    and self._interface_value(desired, "type") != current_type
+                    and self._interfaces_have_same_address(current, desired)
+                ]
+
+            if len(replacement_candidates) == 1:
+                desired_index = replacement_candidates[0]
+                self._replace_interface_type(
+                    host,
+                    current,
+                    desired_interfaces[desired_index],
+                    target_interface_index=matches.get(desired_index),
+                )
+                return self._reconcile_interfaces(
+                    host, desired_interfaces, transfer_linked_items=False
+                )
 
         desired_payload = []
         interfaces_changed = len(current_interfaces) != len(desired_interfaces)
@@ -1996,6 +2158,7 @@ class PhysicalDevice:
             self._set_proxy(proxies)
 
         desired_interfaces = None
+        templates_changed = False
         if full_sync:
             if host["host"] == self.name:
                 self.logger.debug("Host %s: Hostname in-sync.", self.name)
@@ -2022,6 +2185,7 @@ class PhysicalDevice:
             # Check if the templates are in-sync
             templates_in_sync = self.zbx_template_comparer(host["parentTemplates"])
             if not templates_in_sync:
+                templates_changed = True
                 desired_interfaces = self.set_interface_details()
                 self._add_missing_interface_types(host, desired_interfaces)
                 self.logger.info("Host %s: Template(s) OUT of sync.", self.name)
@@ -2205,7 +2369,11 @@ class PhysicalDevice:
         if full_sync:
             if desired_interfaces is None:
                 desired_interfaces = self.set_interface_details()
-            self._reconcile_interfaces(host, desired_interfaces)
+            self._reconcile_interfaces(
+                host,
+                desired_interfaces,
+                transfer_linked_items=not templates_changed,
+            )
         return True
 
     def create_journal_entry(self, severity, message):

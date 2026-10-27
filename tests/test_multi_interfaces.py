@@ -1,8 +1,12 @@
 """Focused tests for creating and reconciling multiple Zabbix interfaces."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
+
+import pytest
+from zabbix_utils import APIRequestError
 
 from netbox_zabbix_sync.modules.device import PhysicalDevice
+from netbox_zabbix_sync.modules.exceptions import SyncExternalError
 from netbox_zabbix_sync.modules.virtual_machine import VirtualMachine
 
 
@@ -176,13 +180,124 @@ def test_reconciliation_does_not_update_matching_interfaces_in_any_order():
 
 def test_reconciliation_replaces_interface_when_type_changes():
     host = build_host_object()
+    existing = snmp_interface(interfaceid="70")
+    staged = agent_interface(interfaceid="72")
+    host.zabbix.item.get.return_value = []
+    host.zabbix.host.get.return_value = [{"interfaces": [existing, staged]}]
 
     host._reconcile_interfaces(
-        {"interfaces": [snmp_interface(interfaceid="70")]},
+        {"interfaces": [existing]},
         [agent_interface()],
+    )
+
+    assert host.zabbix.host.update.call_args_list == [
+        call(
+            hostid=42,
+            interfaces=[
+                existing,
+                {**agent_interface(), "hostid": 42},
+            ],
+        ),
+        call(hostid=42, interfaces=[{**agent_interface(), "interfaceid": "72"}]),
+    ]
+    host.zabbix.item.get.assert_called_once_with(
+        hostids=[42], interfaceids=["70"], output=["itemid"]
+    )
+    host.zabbix.item.update.assert_not_called()
+
+
+def test_reconciliation_moves_linked_items_before_removing_interface():
+    host = build_host_object()
+    existing = snmp_interface(interfaceid="70")
+    staged = agent_interface(interfaceid="72")
+    host.zabbix.host.get.return_value = [{"interfaces": [existing, staged]}]
+    host.zabbix.item.get.return_value = [{"itemid": "99"}]
+    host.zabbix.item.update.return_value = {"itemids": ["99"]}
+
+    host._reconcile_interfaces({"interfaces": [existing]}, [agent_interface()])
+
+    stage_update = call.host.update(
+        hostid=42,
+        interfaces=[
+            existing,
+            {**agent_interface(), "hostid": 42},
+        ],
+    )
+    item_update = call.item.update([{"itemid": "99", "interfaceid": "72"}])
+    remove_update = call.host.update(
+        hostid=42, interfaces=[{**agent_interface(), "interfaceid": "72"}]
+    )
+    calls = host.zabbix.mock_calls
+    assert (
+        calls.index(stage_update)
+        < calls.index(item_update)
+        < calls.index(remove_update)
+    )
+
+
+def test_reconciliation_keeps_old_interface_if_item_migration_fails():
+    host = build_host_object()
+    existing = snmp_interface(interfaceid="70")
+    staged = agent_interface(interfaceid="72")
+    host.zabbix.host.get.return_value = [{"interfaces": [existing, staged]}]
+    host.zabbix.item.get.return_value = [{"itemid": "99"}]
+    host.zabbix.item.update.side_effect = APIRequestError("cannot migrate item")
+
+    with pytest.raises(SyncExternalError, match="Unable to move items"):
+        host._reconcile_interfaces({"interfaces": [existing]}, [agent_interface()])
+
+    host.zabbix.host.update.assert_called_once()
+
+
+def test_reconciliation_resumes_an_already_staged_interface_transition():
+    host = build_host_object()
+    existing = snmp_interface(interfaceid="70")
+    staged = agent_interface(interfaceid="72")
+    host.zabbix.item.get.return_value = [{"itemid": "99"}]
+    host.zabbix.item.update.return_value = {"itemids": ["99"]}
+
+    host._reconcile_interfaces({"interfaces": [existing, staged]}, [agent_interface()])
+
+    host.zabbix.host.update.assert_called_once_with(
+        hostid=42,
+        interfaces=[{**agent_interface(), "interfaceid": "72"}],
+    )
+    host.zabbix.item.update.assert_called_once_with(
+        [{"itemid": "99", "interfaceid": "72"}]
+    )
+    host.zabbix.host.get.assert_not_called()
+
+
+def test_reconciliation_does_not_guess_between_multiple_replaced_interfaces():
+    host = build_host_object()
+
+    host._reconcile_interfaces(
+        {
+            "interfaces": [
+                snmp_interface(interfaceid="70"),
+                agent_interface(interfaceid="71"),
+            ]
+        },
+        [
+            {
+                **agent_interface(),
+                "type": 3,
+                "port": "623",
+            }
+        ],
     )
 
     host.zabbix.host.update.assert_called_once_with(
         hostid=42,
-        interfaces=[{**agent_interface(), "hostid": 42}],
+        interfaces=[
+            {
+                "main": "1",
+                "useip": "1",
+                "dns": "",
+                "ip": "192.0.2.10",
+                "type": 3,
+                "port": "623",
+                "hostid": 42,
+            }
+        ],
     )
