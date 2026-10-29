@@ -63,6 +63,10 @@ extended_virtual_chassis = False
 # ipv6: Prefer IPv6 address over IPv4 address.
 preferred_ip = "auto"
 
+## Prefer DNS names for host interfaces
+# When true, use a configured DNS name instead of the selected IP address.
+prefer_dns = False
+
 ## Enable hostgroup generation. Requires permissions in Zabbix
 create_hostgroups = True
 
@@ -74,11 +78,12 @@ create_journal = False
 # Set a unique label when multiple sync jobs use different endpoints/aliases.
 sync_status_instance_id = ""
 
-## Sync Out-Of-Band IPs
-# When set to True, the script will create an additional Zabbix interface for the OOB IP set configured on the device in NetBox.
-# This will need to be a different interface typ than the interface type used for the primary interface.
-# This can be configured through config contxt, see documentation for futher info:
-# https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Sync-Behavior#out-of-band-interfaces
+## Sync an OOB interface on the same Zabbix host
+# When true, devices with an oob_ip get an additional interface on their normal
+# Zabbix host. Configure zabbix.oob_interface_type in NetBox config context so
+# it differs from the primary and any additional interface types.
+# This is separate from zabbix.oob, which creates a second Zabbix host; enabling
+# both modes monitors the OOB address through both Zabbix hosts.
 oob_sync = False
 
 ## Virtual machine sync

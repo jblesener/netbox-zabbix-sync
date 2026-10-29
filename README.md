@@ -761,6 +761,30 @@ template(s) will take priority over the device type custom field template.
 templates_config_context_overrule = True
 ```
 
+### OOB interface on the same host
+
+Set `oob_sync = True` in `config.py` to add the device's NetBox `oob_ip` as a
+second interface on the normal Zabbix host. This mode is independent of the
+split-host OOB import described below. Configure `oob_interface_type` in the
+device's root `zabbix` config context so it differs from the primary and every
+configured additional interface type; `oob_interface_port` is optional and
+defaults to the Zabbix port for that type. The optional `oob_interface_ip` and
+`oob_interface_dns` keys override the address and DNS name used for this
+same-host OOB interface.
+
+For example, keep SNMP as the primary interface and use an agent interface for
+OOB management:
+
+```json
+{
+    "zabbix": {
+        "interface_type": 2,
+        "snmp": {"version": 2},
+        "oob_interface_type": 1
+    }
+}
+```
+
 ### OOB device import
 
 By default one NetBox device is imported as one Zabbix host using the device's
@@ -776,6 +800,12 @@ The OOB host name is derived from the primary host name. Use `name_prefix` or
 `name_suffix` in `zabbix.oob`; if neither is set, the suffix `-oob` is used. The
 OOB host ID is stored in the custom field configured by `oob_device_cf`, which
 defaults to `zabbix_oob_hostid`.
+
+The split-host mode does not require `oob_sync`. If both modes are configured
+for one device, the same OOB address is added to the primary host and also
+imported as a separate Zabbix host; enable both only when that duplicate
+monitoring is intentional. When `render_config_context = True`, the effective
+`zabbix.oob` context is rendered independently for the derived OOB host.
 
 ```json
 {
@@ -1302,12 +1332,16 @@ environment. For example, you could:
 
 ##### Multiple interfaces
 
-The existing `interface_type`, `interface_port`, and `snmp` settings define the
-primary interface. By default it uses the NetBox device or VM primary IP; set `ip`
-directly under `zabbix` to override that address. An IP-less VM with this override
-will also get a primary interface. Add `additional_interfaces` under `zabbix`
-to configure further interfaces for the same Zabbix host. For example, a Linux host
-can keep SNMP as its primary interface and also expose a Zabbix agent interface:
+The `interface_type`, `interface_port`, and `snmp` settings define the primary
+interface. Its default address comes from the NetBox primary IP selected by
+`preferred_ip`; `interface_ip` overrides that address. The fork's older `ip`
+key remains supported as an alias, but `interface_ip` wins when both keys are
+non-empty. `interface_dns` similarly takes precedence over the older `dns` key.
+When both IP and DNS are configured, `prefer_dns` controls which endpoint type
+Zabbix uses. An IP-less VM with an explicit address or DNS override will also
+get a primary interface. Add `additional_interfaces` under `zabbix` to configure
+further interfaces for the same Zabbix host. For example, a Linux host can keep
+SNMP as its primary interface and also expose a Zabbix agent interface:
 
 ```json
 {
@@ -1328,11 +1362,12 @@ can keep SNMP as its primary interface and also expose a Zabbix agent interface:
 ```
 
 Each additional entry must define `interface_type` (1 Agent, 2 SNMP, 3 IPMI, or
-4 JMX). It can also set `interface_port` and, for SNMP, an `snmp` object. By default,
-an additional interface uses the host's primary IP, an empty DNS name, and `useip=1`.
-Override `ip`, `dns`, and `useip` to use a different endpoint; DNS-based interfaces
-must set `useip=0` and a non-empty `dns`. An IP-less VM can have additional interfaces
-only when their endpoint is explicitly configured.
+4 JMX). It can also set `interface_port` and, for SNMP, an `snmp` object. IPMI
+interfaces use the host-level `zabbix.ipmi` credentials. By default, an
+additional interface uses the host's selected primary IP, an empty DNS name,
+and `useip=1`. Override `ip`, `dns`, and `useip` to use a different endpoint;
+DNS-based interfaces must set `useip=0` and a non-empty `dns`. An IP-less VM can
+have additional interfaces only when their endpoint is explicitly configured.
 
 By default the first interface of each type is marked `main=1` and any later
 interfaces of that same type are marked `main=0`. You may explicitly set `main` to

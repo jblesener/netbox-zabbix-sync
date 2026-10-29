@@ -26,6 +26,30 @@ class TestHostInit(unittest.TestCase):
         self.assertIsNone(device.zabbix_id)
         self.assertEqual(device.hostgroup_type, "dev")
 
+    def test_upstream_ip_and_dns_context_keys_precede_fork_aliases(self):
+        """Canonical upstream endpoint keys win over legacy fork aliases."""
+        nb = self.netbox.device(
+            "test-device",
+            config_context={
+                "zabbix": {
+                    "interface_ip": "192.0.2.21",
+                    "ip": "192.0.2.20",
+                    "interface_dns": "monitor.example.net",
+                    "dns": "legacy.example.net",
+                }
+            },
+        )
+        device = physical_device(nb, prefer_dns=True)
+
+        device.set_ips()
+        interfaces = device.set_interface_details()
+
+        self.assertEqual(device.ip, "192.0.2.21")
+        self.assertEqual(device.dns, "monitor.example.net")
+        self.assertEqual(interfaces[0]["ip"], "192.0.2.21")
+        self.assertEqual(interfaces[0]["dns"], "monitor.example.net")
+        self.assertEqual(interfaces[0]["useip"], "0")
+
     def test_set_basics_with_special_characters(self):
         """Device name with special characters triggers NETBOX_ID renaming."""
         nb = self.netbox.device("test-devïce", id=123)

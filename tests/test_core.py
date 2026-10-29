@@ -1508,7 +1508,7 @@ class TestDeviceHandeling(unittest.TestCase):
     def test_config_context_oob_creates_primary_and_oob(
         self, mock_api, mock_zabbix_api
     ):
-        """A zabbix.oob config creates a separate host for oob_ip."""
+        """Same-host OOB and split-host OOB remain distinct when both are enabled."""
         oob_ip = MagicMock()
         oob_ip.address = "10.0.0.10/24"
         device = MockNetboxDevice(
@@ -1519,6 +1519,7 @@ class TestDeviceHandeling(unittest.TestCase):
                 "zabbix": {
                     "templates": ["PrimaryTemplate"],
                     "interface_type": 1,
+                    "oob_interface_type": 4,
                     "oob": {
                         "name_prefix": "drac-",
                         "templates": ["OobTemplate"],
@@ -1539,7 +1540,7 @@ class TestDeviceHandeling(unittest.TestCase):
             {"templateid": "2", "name": "OobTemplate"},
         ]
 
-        syncer = Sync()
+        syncer = Sync(config={"oob_sync": True})
         syncer.connect(
             "http://netbox.local",
             "nb_token",
@@ -1556,6 +1557,14 @@ class TestDeviceHandeling(unittest.TestCase):
         self.assertEqual(create_calls[0].kwargs["interfaces"][0]["ip"], "192.168.1.1")
         self.assertEqual(create_calls[0].kwargs["templates"], [{"templateid": "1"}])
         self.assertEqual(create_calls[0].kwargs["interfaces"][0]["type"], 1)
+        self.assertEqual(
+            {interface["type"] for interface in create_calls[0].kwargs["interfaces"]},
+            {1, 4},
+        )
+        self.assertEqual(
+            {interface["ip"] for interface in create_calls[0].kwargs["interfaces"]},
+            {"192.168.1.1", "10.0.0.10"},
+        )
         self.assertEqual(create_calls[1].kwargs["host"], "drac-vmhost1")
         self.assertEqual(create_calls[1].kwargs["interfaces"][0]["ip"], "10.0.0.10")
         self.assertEqual(create_calls[1].kwargs["templates"], [{"templateid": "2"}])
@@ -1568,6 +1577,46 @@ class TestDeviceHandeling(unittest.TestCase):
         self.assertEqual(create_calls[1].kwargs["interfaces"][1]["ip"], "10.0.0.10")
         self.assertEqual(device.custom_fields["zabbix_hostid"], 1)
         self.assertEqual(device.custom_fields["zabbix_oob_hostid"], 1)
+
+    def test_jinja_config_context_is_rendered_in_split_oob_scope(self):
+        """Rendering the primary context leaves split OOB values independent."""
+        oob_ip = MagicMock()
+        oob_ip.address = "10.0.0.10/24"
+        device = MockNetboxDevice(
+            device_id=1,
+            name="vmhost1",
+            oob_ip=oob_ip,
+            config_context={
+                "zabbix": {
+                    "usermacros": {"{$PRIMARY}": "primary"},
+                    "oob": {
+                        "name_prefix": "mgmt-",
+                        "usermacros": {"{$OOB}": "{{ data.name }}"},
+                    },
+                }
+            },
+        )
+        syncer = Sync(config={"render_config_context": True}, logger=MagicMock())
+        imports = syncer._get_device_imports(device, UnsyncedSummary())
+        split_import = imports[1][0]
+        primary_host = SimpleNamespace(
+            name=device.name, config_context=device.config_context
+        )
+
+        self.assertTrue(syncer._render_config_context(primary_host, device))
+        self.assertEqual(
+            split_import.config_context["zabbix"]["usermacros"]["{$OOB}"],
+            "{{ data.name }}",
+        )
+
+        split_host = SimpleNamespace(
+            name=split_import.name, config_context=split_import.config_context
+        )
+        self.assertTrue(syncer._render_config_context(split_host, split_import))
+        self.assertEqual(
+            split_host.config_context["zabbix"]["usermacros"],
+            {"{$OOB}": "mgmt-vmhost1"},
+        )
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")

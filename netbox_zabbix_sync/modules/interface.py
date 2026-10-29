@@ -9,6 +9,7 @@ from netbox_zabbix_sync.modules.exceptions import InterfaceConfigError
 
 DEFAULT_PORTS = {1: 10050, 2: 161, 3: 623, 4: 12345}
 SNMP_INTERFACE_TYPE = 2
+IPMI_INTERFACE_TYPE = 3
 
 
 class ZabbixInterface:
@@ -166,6 +167,8 @@ class ZabbixInterface:
             # Checks if IPMI settings are defined in NetBox
             if "ipmi" in self.context["zabbix"]:
                 ipmi = self.context["zabbix"]["ipmi"]
+                if not isinstance(ipmi, Mapping):
+                    raise InterfaceConfigError("IPMI configuration must be an object.")
                 details: dict[str, str] = {}
                 self.interface["details"] = details
                 # Check for IPMI username
@@ -251,6 +254,8 @@ class ZabbixInterface:
             self.set_snmp()
         elif interface_type == SNMP_INTERFACE_TYPE:
             self.set_default_snmp()
+        elif interface_type == IPMI_INTERFACE_TYPE:
+            self.set_ipmi()
 
         if not additional and "ip" in options:
             self.interface["ip"] = options["ip"]
@@ -297,9 +302,12 @@ class ZabbixInterface:
 
         interfaces = []
         if include_primary:
-            primary_options = (
-                zabbix if "interface_type" in zabbix or "ip" in zabbix else {}
-            )
+            primary_options = dict(zabbix) if "interface_type" in zabbix else {}
+            primary_ip = zabbix.get("interface_ip") or zabbix.get("ip")
+            if primary_ip:
+                primary_options["ip"] = primary_ip
+            else:
+                primary_options.pop("ip", None)
             primary = cls(context, ip, dns, prefer_dns)
             primary._configure(primary_options, default_type, additional=False)
             interfaces.append(primary.interface)

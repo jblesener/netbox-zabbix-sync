@@ -151,6 +151,22 @@ def test_oob_sync_rejects_a_duplicate_interface_type():
         host.set_interface_details()
 
 
+def test_oob_sync_rejects_a_type_used_by_an_additional_interface():
+    host = build_host_object(
+        {
+            "zabbix": {
+                "oob_interface_type": 1,
+                "additional_interfaces": [{"interface_type": 1}],
+            }
+        }
+    )
+    host.config["oob_sync"] = True
+    host.oob_ip = "198.51.100.20"
+
+    with pytest.raises(SyncInventoryError, match="OOB interface type must differ"):
+        host.set_interface_details()
+
+
 def test_reconciliation_adds_new_interface_and_preserves_matched_id():
     host = build_host_object()
     existing_snmp = snmp_interface(interfaceid="70")

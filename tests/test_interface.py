@@ -295,6 +295,44 @@ class TestZabbixInterface(unittest.TestCase):
         self.assertEqual(interfaces[0]["type"], "2")
         self.assertEqual(interfaces[0]["details"]["version"], "2")
 
+    def test_upstream_primary_ip_key_takes_precedence_over_fork_alias(self):
+        """The upstream key wins when both primary IP context keys are set."""
+        context = {
+            "zabbix": {
+                "interface_ip": "192.0.2.21",
+                "ip": "192.0.2.20",
+            }
+        }
+
+        interfaces = ZabbixInterface.build_interfaces(
+            context, self.test_ip, default_type=2
+        )
+
+        self.assertEqual(interfaces[0]["ip"], "192.0.2.21")
+
+    def test_ipmi_additional_interface_uses_host_ipmi_settings(self):
+        """Additional IPMI interfaces use credentials from the host context."""
+        context = {
+            "zabbix": {
+                "ipmi": {"username": "user", "password": "pass"},
+                "additional_interfaces": [{"interface_type": 3}],
+            }
+        }
+
+        interfaces = ZabbixInterface.build_interfaces(
+            context, self.test_ip, default_type=2
+        )
+
+        self.assertEqual(interfaces[1]["type"], 3)
+        self.assertEqual(interfaces[1]["port"], "623")
+
+    def test_ipmi_interface_requires_host_credentials(self):
+        """An IPMI interface without shared host credentials is invalid."""
+        context = {"zabbix": {"interface_type": 3}}
+
+        with self.assertRaisesRegex(InterfaceConfigError, "no parameters provided"):
+            ZabbixInterface.build_interfaces(context, self.test_ip, default_type=2)
+
     def test_additional_interfaces_default_main_once_per_type(self):
         """Only the first interface of each type defaults to main."""
         context = {

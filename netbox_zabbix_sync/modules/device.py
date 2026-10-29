@@ -54,7 +54,10 @@ class NetboxDeviceImport:
         self.config_context = {"zabbix": zabbix_context}
 
     def __getattr__(self, name):
-        return getattr(self.nb, name)
+        nb = self.__dict__.get("nb")
+        if nb is None:
+            raise AttributeError(name)
+        return getattr(nb, name)
 
     def __getitem__(self, key):
         return getattr(self, key)

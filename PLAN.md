@@ -58,15 +58,15 @@ fork's older core/device structure wholesale.
    - [x] Adopt upstream's supported NetBox/API compatibility work and test
      scaffolding without dropping the fork's publishing workflow.
 
-3. **Reconcile overlapping behavior**
-   - Preserve both OOB modes with separate, documented configuration and
+3. **Reconcile overlapping behavior — complete**
+   - [x] Preserve both OOB modes with separate, documented configuration and
      tests.
-   - Extend interface construction/reconciliation to support the fork's
+   - [x] Extend interface construction/reconciliation to support the fork's
      `additional_interfaces` while retaining upstream OOB, IPMI, preferred-IP,
      and DNS behavior.
-   - Preserve existing fork config-context keys and define their precedence
+   - [x] Preserve existing fork config-context keys and define their precedence
      relative to upstream keys.
-   - Integrate Jinja2 config-context rendering without breaking split OOB
+   - [x] Integrate Jinja2 config-context rendering without breaking split OOB
      imports or fork-specific context values.
 
 4. **Port fork-only features**
@@ -124,9 +124,26 @@ fork's older core/device structure wholesale.
 - Verification: `uv run pytest -q` — 492 passed, 162 deselected, 1 xfailed,
   16 subtests passed; focused interface tests — 15 passed; Ruff, `ty check`,
   `uv lock --check`, and `uv build` passed.
-- Container-backed functional tests were not run; they require a live
-  NetBox/Zabbix stack. Remaining overlapping-feature reconciliation and
-  broader fork-only ports stay in Phases 3–4.
+- At the end of Phase 2, container-backed functional tests had not been run;
+  they require a live NetBox/Zabbix stack. Phases 3–4 were still pending.
+
+## Phase 3 execution record
+
+- Documented same-host OOB interfaces (`oob_sync`) separately from split-host
+  imports (`zabbix.oob`) in `README.md` and `config.py.example`; both can be
+  enabled together, with the duplicate-monitoring consequence called out.
+- Kept `ip` and `dns` as supported fork aliases while defining upstream
+  `interface_ip` and `interface_dns` as higher-precedence keys. Primary
+  interface construction now applies the same IP precedence as `Host.set_ips`.
+- Preserved primary and additional IPMI interfaces by validating the shared
+  host-level IPMI settings. Added unit coverage for IPMI, endpoint precedence,
+  combined OOB modes, and Jinja rendering of the split OOB context.
+- Fixed `NetboxDeviceImport` attribute delegation during shallow copies so
+  Jinja rendering can serialize the split-host adapter without recursion.
+- Verification: `uv run pytest -q` — 498 passed, 162 deselected, 1 xfailed,
+  16 subtests passed; Ruff, formatting, `ty check`, `uv lock --check`, and
+  `uv build` passed. The deselected container-backed tests require the live
+  stack planned for Phase 6 and were not run here.
 
 ## Completion criteria
 
