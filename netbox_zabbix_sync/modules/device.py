@@ -4,7 +4,6 @@ Device specific handeling for NetBox to Zabbix
 
 from collections.abc import Mapping
 from copy import deepcopy
-from logging import getLogger
 from operator import itemgetter
 from re import fullmatch
 from types import SimpleNamespace
@@ -19,6 +18,7 @@ from netbox_zabbix_sync.modules.exceptions import (
     SyncInventoryError,
     TemplateError,
 )
+from netbox_zabbix_sync.modules.host import Host
 from netbox_zabbix_sync.modules.host_description import Description
 from netbox_zabbix_sync.modules.hostgroups import Hostgroup
 from netbox_zabbix_sync.modules.interface import ZabbixInterface
@@ -118,11 +118,13 @@ class NetboxClusterImport:
         yield from data.items()
 
 
-class PhysicalDevice:
+class PhysicalDevice(Host):
     """
     Represents Network device.
     INPUT: (NetBox device class, ZabbixAPI class, journal flag, NB journal class)
     """
+
+    nb_object_type = "dcim.device"
 
     def __init__(
         self,
@@ -135,37 +137,21 @@ class PhysicalDevice:
         config=None,
     ):
         self.config = config if config is not None else load_config()
-        self.nb = nb
         self.device_cf = self.config["device_cf"]
-        self.id = nb.id
-        self.name = nb.name
-        self.visible_name = None
-        self.status = nb.status.label
-        self.zabbix = zabbix
-        self.zabbix_id = None
-        self.group_ids = []
-        self.nb_api_version = nb_version
-        self.zbx_template_names = []
-        self.zbx_templates = []
-        self.hostgroups = []
-        self.hostgroup_type = "dev"
-        self.tenant = nb.tenant
-        self.config_context = nb.config_context
-        self.zbxproxy = None
-        self.zabbix_state = 0
+        super().__init__(
+            nb,
+            zabbix,
+            nb_journal_class,
+            nb_version,
+            journal=journal,
+            logger=logger,
+            config=self.config,
+        )
         self.zabbix_status = None
         self.zabbix_interfaces = None
-        self.journal = journal
-        self.nb_journals = nb_journal_class
-        self.inventory_mode = -1
-        self.inventory = {}
-        self.usermacros = []
-        self.tags: list[dict[str, Any]] = []
         self.cleanup_source_marker = None
         self.tls = {}
         self.adopted_azure_discovered_host = False
-        self.logger = logger if logger else getLogger(__name__)
-        self._set_basics()
 
     def __repr__(self):
         return self.name
@@ -248,18 +234,33 @@ class PhysicalDevice:
         """
         Sets basic information like IP address.
         """
+        context = getattr(self.nb, "config_context", None)
+        zabbix_context = (
+            context.get("zabbix", {}) if isinstance(context, Mapping) else {}
+        )
+        context_ip = (
+            zabbix_context.get("interface_ip") or zabbix_context.get("ip")
+            if isinstance(zabbix_context, Mapping)
+            else None
+        )
+        context_dns = (
+            zabbix_context.get("interface_dns") or zabbix_context.get("dns")
+            if isinstance(zabbix_context, Mapping)
+            else None
+        )
         # A primary IP is required for physical devices. VM subclasses may
         # explicitly opt out when their monitoring does not use an interface.
+        # Config context overrides are also valid interface sources.
         if self.nb.primary_ip:
             self.cidr = self.nb.primary_ip.address
             self.ip = self.cidr.split("/")[0]
-        elif self._requires_primary_ip():
+        elif self._requires_primary_ip() and not (context_ip or context_dns):
             e = f"Host {self.name}: no primary IP."
             self.logger.warning(e)
             raise SyncInventoryError(e)
         else:
             self.cidr = None
-            self.ip = None
+            self.ip = context_ip
 
         # Check if device has custom field for ZBX ID
         if self.device_cf in self.nb.custom_fields:
@@ -268,6 +269,11 @@ class PhysicalDevice:
             e = f"Host {self.name}: Custom field {self.device_cf} not present"
             self.logger.error(e)
             raise SyncInventoryError(e)
+
+        if context_ip:
+            self.ip = context_ip
+        if context_dns:
+            self.dns = context_dns
 
         self._validate_hostname()
 
@@ -1699,12 +1705,53 @@ class PhysicalDevice:
         self.update_zabbix_host(interfaces=desired_payload)
         return True
 
-    def set_interface_details(self):
+    def set_interface_details(self, oob: bool = False):
         """
         Checks interface parameters from NetBox and
         creates a model for the interface to be used in Zabbix.
         """
-        return self._build_interface_details(default_type=2)
+        try:
+            if oob:
+                return self._build_oob_interface_detail()
+            interfaces = self._build_interface_details(default_type=2)
+            if (
+                self.config.get("oob_sync", False)
+                and (self.cleanup_source_marker or "").partition(":")[0] != "device-oob"
+                and self.oob_ip
+            ):
+                oob_interface = self._build_oob_interface_detail()
+                if any(
+                    str(interface["type"]) == str(oob_interface["type"])
+                    for interface in interfaces
+                ):
+                    raise InterfaceConfigError(
+                        "OOB interface type must differ from the other interface types."
+                    )
+                interfaces.append(oob_interface)
+            return interfaces
+        except InterfaceConfigError as e:
+            message = f"{self.name}: {e}"
+            self.logger.warning(message)
+            raise SyncInventoryError(message) from e
+
+    def _build_oob_interface_detail(self):
+        """Build the upstream-style OOB interface for the host."""
+        oob_interface = ZabbixInterface(
+            self.config_context,
+            self.oob_ip or "",
+            self.oob_dns,
+            prefer_dns=self.config.get("prefer_dns", False),
+            oob=True,
+        )
+        if oob_interface.get_context():
+            oob_type = str(oob_interface.interface["type"])
+            if oob_type == "2":
+                oob_interface.set_snmp()
+            elif oob_type == "3":
+                oob_interface.set_ipmi()
+        else:
+            oob_interface.set_default_snmp()
+        return oob_interface.interface
 
     def _build_interface_details(self, default_type, *, include_primary=True):
         """Build the interface list while reporting configuration errors per host."""
@@ -1714,6 +1761,8 @@ class PhysicalDevice:
                 self.ip,
                 default_type,
                 include_primary=include_primary,
+                dns=self.dns,
+                prefer_dns=self.config.get("prefer_dns", False),
             )
         except InterfaceConfigError as e:
             message = f"{self.name}: {e}"
@@ -1851,6 +1900,7 @@ class PhysicalDevice:
         # Includes proxy group fix since Zabbix <= 6 should ignore this
         proxy_types = ["proxy"]
         proxy_name = None
+        site = getattr(self.nb, "site", None)
 
         zabbix_7_version = 7.0
 
@@ -1871,11 +1921,12 @@ class PhysicalDevice:
                         self.nb.custom_fields[self.config[field_config]]
                     )
                 elif (
-                    self.config[field_config] in self.nb.site.custom_fields
-                    and self.nb.site.custom_fields[self.config[field_config]]
+                    site
+                    and self.config[field_config] in site.custom_fields
+                    and site.custom_fields[self.config[field_config]]
                 ):
                     proxy_name = cf_to_string(
-                        self.nb.site.custom_fields[self.config[field_config]]
+                        site.custom_fields[self.config[field_config]]
                     )
 
             # Otherwise check if the proxy is configured in NetBox CC
@@ -1958,6 +2009,13 @@ class PhysicalDevice:
             # Add TLS / encryption settings when tls_sync is enabled.
             # Empty when disabled, leaving Zabbix defaults untouched.
             create_data.update(self.tls)
+            if self.ipmi:
+                create_data["ipmi_username"] = self.ipmi.get("username")
+                create_data["ipmi_password"] = self.ipmi.get("password")
+                if "authtype" in self.ipmi:
+                    create_data["ipmi_authtype"] = self.ipmi["authtype"]
+                if "privilege" in self.ipmi:
+                    create_data["ipmi_privilege"] = self.ipmi["privilege"]
             # If a Zabbix proxy or Zabbix Proxy group has been defined
             if self.zbxproxy:
                 # If a lower version than 7 is used, we can assume that
@@ -2421,7 +2479,7 @@ class PhysicalDevice:
                 )
                 return False
             journal = {
-                "assigned_object_type": "dcim.device",
+                "assigned_object_type": self.nb_object_type,
                 "assigned_object_id": self.id,
                 "kind": severity,
                 "comments": message,

@@ -14,13 +14,18 @@ SNMP_INTERFACE_TYPE = 2
 class ZabbixInterface:
     """Class that represents a Zabbix interface."""
 
-    def __init__(self, context, ip):
+    def __init__(self, context, ip, dns="", prefer_dns=False, oob=False):
+        useip = 1  # Use IP by default
         self.context = context
+        self.is_oob = oob
         self.ip = ip
+        self.dns = dns
+        if (self.dns and prefer_dns) or (not self.ip and self.dns):
+            useip = 0
         self.skelet: dict[str, Any] = {
             "main": "1",
-            "useip": "1",
-            "dns": "",
+            "useip": str(useip),
+            "dns": self.dns,
             "ip": self.ip,
         }
         self.interface = self.skelet.copy()
@@ -30,6 +35,9 @@ class ZabbixInterface:
         """Normalize and validate a Zabbix interface type."""
         if isinstance(value, bool):
             raise InterfaceConfigError("Interface type must be an integer from 1 to 4.")
+        type_names = {"agent": 1, "snmp": 2, "ipmi": 3, "jmx": 4}
+        if isinstance(value, str) and value.strip().lower() in type_names:
+            return type_names[value.strip().lower()]
         try:
             interface_type = int(value)
         except (OverflowError, TypeError, ValueError) as e:
@@ -67,17 +75,48 @@ class ZabbixInterface:
 
     def get_context(self):
         """check if NetBox custom context has been defined."""
-        if "zabbix" in self.context:
-            zabbix = self.context["zabbix"]
-            if "interface_type" in zabbix:
-                self.interface["type"] = zabbix["interface_type"]
-                if "interface_port" not in zabbix:
-                    self._set_default_port()
-                    return True
-                self.interface["port"] = zabbix["interface_port"]
-                return True
+        int_types = {"agent": 1, "snmp": 2, "ipmi": 3, "jmx": 4}
+        int_type = "interface_type"
+        int_port = "interface_port"
+        max_port = 65536
+        max_type = 5
+        if self.is_oob:
+            int_type = "oob_interface_type"
+            int_port = "oob_interface_port"
+        if self.context is None:
             return False
-        return False
+        if not isinstance(self.context, Mapping):
+            raise InterfaceConfigError("Zabbix config context must be an object.")
+        if "zabbix" not in self.context:
+            return False
+        zabbix = self.context["zabbix"]
+        if not isinstance(zabbix, Mapping):
+            raise InterfaceConfigError(
+                "The zabbix config-context value must be an object."
+            )
+        if int_type not in zabbix:
+            return False
+        configured_type = str(zabbix[int_type]).strip()
+        # Use valid integer for type if set
+        if configured_type.isdigit() and (0 < int(configured_type) < max_type):
+            self.interface["type"] = zabbix[int_type]
+        # Otherwise, convert string to type integer
+        elif configured_type.lower() in int_types:
+            self.interface["type"] = int_types[configured_type.lower()]
+        else:
+            e = f"Interface type '{zabbix[int_type]}' is not valid."
+            raise InterfaceConfigError(e)
+        # Use default port if not specified in Config Context
+        if int_port not in zabbix:
+            self._set_default_port()
+            return True
+        # Otherwise, validate Config Context port value
+        elif str(zabbix[int_port]).isdigit() and (0 < int(zabbix[int_port]) < max_port):
+            self.interface["port"] = str(zabbix[int_port])
+            return True
+        else:
+            e = f"Interface port '{zabbix[int_port]}' is not valid."
+            raise InterfaceConfigError(e)
 
     def set_snmp(self):
         """Check if interface is type SNMP."""
@@ -120,6 +159,30 @@ class ZabbixInterface:
                 "Interface type is not SNMP, unable to set SNMP details"
             )
 
+    def set_ipmi(self):
+        """Check if interface is type IPMI"""
+        ipmi_interface_type = 3
+        if self._interface_type(self.interface["type"]) == ipmi_interface_type:
+            # Checks if IPMI settings are defined in NetBox
+            if "ipmi" in self.context["zabbix"]:
+                ipmi = self.context["zabbix"]["ipmi"]
+                details: dict[str, str] = {}
+                self.interface["details"] = details
+                # Check for IPMI username
+                if not ipmi.get("username"):
+                    e = "No IPMI user provided."
+                    raise InterfaceConfigError(e)
+                # Check for IPMI password
+                if not ipmi.get("password"):
+                    e = "No IPMI password provided."
+                    raise InterfaceConfigError(e)
+            else:
+                e = "Interface type IPMI but no parameters provided."
+                raise InterfaceConfigError(e)
+        else:
+            e = "Interface type is not IPMI, unable to set IPMI details"
+            raise InterfaceConfigError(e)
+
     def set_default_snmp(self):
         """Set default config to SNMPv2, port 161 and community macro."""
         self.interface = self.skelet.copy()
@@ -147,7 +210,12 @@ class ZabbixInterface:
 
         configured_type = options.get("interface_type", str(default_type))
         interface_type = self._interface_type(configured_type)
-        self.interface["type"] = configured_type
+        self.interface["type"] = (
+            interface_type
+            if isinstance(configured_type, str)
+            and not configured_type.strip().isdigit()
+            else configured_type
+        )
         port = options.get("interface_port", DEFAULT_PORTS[interface_type])
         if (
             isinstance(port, bool)
@@ -201,7 +269,16 @@ class ZabbixInterface:
         return self.interface
 
     @classmethod
-    def build_interfaces(cls, context, ip, default_type, *, include_primary=True):
+    def build_interfaces(
+        cls,
+        context,
+        ip,
+        default_type,
+        *,
+        include_primary=True,
+        dns="",
+        prefer_dns=False,
+    ):
         """Build the primary and any additional interfaces from NetBox context."""
         if context is None:
             context = {}
@@ -223,12 +300,12 @@ class ZabbixInterface:
             primary_options = (
                 zabbix if "interface_type" in zabbix or "ip" in zabbix else {}
             )
-            primary = cls(context, ip)
+            primary = cls(context, ip, dns, prefer_dns)
             primary._configure(primary_options, default_type, additional=False)
             interfaces.append(primary.interface)
 
         for options in additional:
-            interface = cls(context, ip)
+            interface = cls(context, ip, dns, prefer_dns)
             interface._configure(options, default_type, additional=True)
             interfaces.append(interface.interface)
 

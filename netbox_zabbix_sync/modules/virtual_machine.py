@@ -9,6 +9,8 @@ from netbox_zabbix_sync.modules.exceptions import TemplateError
 class VirtualMachine(PhysicalDevice):
     """Model for virtual machines"""
 
+    nb_object_type = "virtualization.virtualmachine"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.hostgroup = None
@@ -32,7 +34,7 @@ class VirtualMachine(PhysicalDevice):
         to skip a lookup of custom fields."""
         # Gather templates ONLY from the device specific context
         try:
-            self.zbx_template_names = self.get_templates_context()
+            self.zbx_template_names = self._get_templates_context()
         except TemplateError as e:
             self.logger.warning(e)
         return True
@@ -41,16 +43,21 @@ class VirtualMachine(PhysicalDevice):
         """VMs used for interface-free checks do not need a primary IP."""
         return False
 
-    def set_interface_details(self):
+    def set_interface_details(self, oob: bool = False):
         """
         Overwrites device function to select an agent interface type by default
         Agent type interfaces are more likely to be used with VMs then SNMP
         """
+        if oob:
+            return super().set_interface_details(oob=True)
         context = getattr(self.nb, "config_context", None)
         zabbix_context = (
             context.get("zabbix", {}) if isinstance(context, Mapping) else {}
         )
-        has_ip_override = isinstance(zabbix_context, Mapping) and "ip" in zabbix_context
+        has_ip_override = isinstance(zabbix_context, Mapping) and any(
+            key in zabbix_context
+            for key in ("ip", "interface_ip", "dns", "interface_dns")
+        )
         return self._build_interface_details(
             default_type=1, include_primary=bool(self.ip) or has_ip_override
         )

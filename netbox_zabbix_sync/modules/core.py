@@ -24,13 +24,19 @@ from netbox_zabbix_sync.modules.device import (
     NetboxDeviceImport,
     PhysicalDevice,
 )
-from netbox_zabbix_sync.modules.exceptions import SyncError, SyncInventoryError
+from netbox_zabbix_sync.modules.exceptions import (
+    JinjaRenderError,
+    SyncError,
+    SyncInventoryError,
+)
 from netbox_zabbix_sync.modules.logging import get_logger
 from netbox_zabbix_sync.modules.settings import DEFAULT_CONFIG
 from netbox_zabbix_sync.modules.status_journal import SyncStatusJournal
 from netbox_zabbix_sync.modules.status_report import SyncStatusReport
 from netbox_zabbix_sync.modules.tools import (
     convert_recordset,
+    extend_ips,
+    jinjafy_config_context,
     proxy_prepper,
     verify_hg_format,
 )
@@ -127,7 +133,7 @@ class Sync:
     This class is used to connect to NetBox and Zabbix and run the sync process.
     """
 
-    def __init__(self, config: dict[str, Any] | None = None):
+    def __init__(self, config: dict[str, Any] | None = None, logger=None):
         """
         Docstring for __init__
 
@@ -138,6 +144,7 @@ class Sync:
         self.zabbix = None
         self.zabbix_host = None
         self.nb_version = None
+        self.logger = logger if logger else get_logger()
 
         default_config = DEFAULT_CONFIG.copy()
 
@@ -191,6 +198,8 @@ class Sync:
             reason = "missing Zabbix templates in config context"
         elif "template" in message and "unable to find" in message:
             reason = "configured Zabbix template is unavailable"
+        elif "jinja config-context rendering failed" in message:
+            reason = "Jinja config-context rendering failed"
         elif "hostgroup" in message:
             reason = "no usable Zabbix hostgroup"
         elif "interface" in message:
@@ -217,6 +226,50 @@ class Sync:
         if record_id is None:
             raise ValueError("NetBox record is missing an ID")
         return int(record_id)
+
+    def _render_config_context(self, host, nb_obj):
+        """Render a host's Zabbix config context when the experimental option is enabled."""
+        context = getattr(nb_obj, "config_context", None)
+        if (
+            not self.config["render_config_context"]
+            or not isinstance(context, Mapping)
+            or "zabbix" not in context
+        ):
+            return True
+
+        self.logger.debug(
+            "Host %s: *EXPERIMENTAL* Rendering config context with Jinja2.",
+            host.name,
+        )
+        try:
+            rendered_context = jinjafy_config_context(nb_obj)
+        except JinjaRenderError as error:
+            self.logger.exception(
+                "Host %s: Skipping due to error while rendering config context: %s",
+                host.name,
+                error,
+            )
+            self.logger.debug(
+                "Host %s: Source Config Context:\n%s",
+                host.name,
+                pformat(context),
+            )
+            return False
+
+        if not isinstance(rendered_context, dict):
+            self.logger.error(
+                "Host %s: Skipping due to unknown issue while rendering config context.",
+                host.name,
+            )
+            return False
+
+        if isinstance(host.config_context, MutableMapping):
+            host.config_context["zabbix"] = rendered_context
+        else:
+            host.config_context = {**context, "zabbix": rendered_context}
+        if isinstance(context, MutableMapping):
+            context["zabbix"] = rendered_context
+        return True
 
     @staticmethod
     def _host_label(host):
@@ -943,7 +996,7 @@ class Sync:
             netbox_journals,
             self.nb_version,
             self.config["create_journal"],
-            logger,
+            self.logger,
             config=self.config,
         )
         vm.normalize_hostname()
@@ -951,13 +1004,6 @@ class Sync:
         vm.set_cleanup_source(source_type)
         linked_before_run = bool(vm.zabbix_id)
         logger.debug("Host %s: Started operations on %s.", vm.name, source_type)
-        vm.set_vm_template()
-        if not vm.zbx_template_names:
-            summary.record(
-                summary_label,
-                self._template_skip_reason(nb_object, self.config, vm=True),
-            )
-            return
 
         def resolve_hostgroups():
             if vm.set_hostgroup(
@@ -981,10 +1027,24 @@ class Sync:
         if self.config["extended_site_properties"] and nb_object.site:
             logger.debug("Host %s: extending site information.", vm.name)
             nb_object.site.full_details()
+        if source_type == "vm" and self.config["extended_ips"]:
+            logger.debug("Host %s: extending IP information.", vm.name)
+            extend_ips(nb_object)
+        if not self._render_config_context(vm, nb_object):
+            raise SyncInventoryError("Jinja config-context rendering failed")
+        vm.set_ips()
+        vm.set_vm_template()
+        if not vm.zbx_template_names:
+            summary.record(
+                summary_label,
+                self._template_skip_reason(nb_object, self.config, vm=True),
+            )
+            return
         vm.set_inventory(nb_object)
         vm.set_usermacros()
         vm.set_tags()
         vm.set_tls()
+        vm.set_ipmi()
         logger.debug("Host %s NetBox data: %s", vm.name, pformat(dict(nb_object)))
         if source_type == "vm" and vm.repair_vmware_vm_lld_host_link() is False:
             summary.record(
@@ -1091,24 +1151,13 @@ class Sync:
             netbox_journals,
             self.nb_version,
             device_config["create_journal"],
-            logger,
+            self.logger,
             config=device_config,
         )
         status_report.attach_model(report_key, device)
         device.set_cleanup_source("device-oob" if split_import else "device")
         linked_before_run = bool(device.zabbix_id)
         logger.debug("Host %s: Started operations on device.", device.name)
-        device.set_template(
-            device_config["templates_config_context"],
-            device_config["templates_config_context_overrule"],
-        )
-        # Check if a valid template has been found for this device.
-        if not device.zbx_template_names:
-            summary.record(
-                summary_label,
-                self._template_skip_reason(nb_device, device_config),
-            )
-            return True
 
         def resolve_hostgroups():
             return device.set_hostgroup(
@@ -1124,6 +1173,23 @@ class Sync:
             if "members" in dict(nb_device.virtual_chassis):
                 for member in nb_device.virtual_chassis.members:
                     member.full_details()
+        if device_config["extended_ips"]:
+            logger.debug("Host %s: extending IP information.", device.name)
+            extend_ips(nb_device)
+        if not self._render_config_context(device, nb_device):
+            raise SyncInventoryError("Jinja config-context rendering failed")
+        device.set_ips()
+        device.set_template(
+            device_config["templates_config_context"],
+            device_config["templates_config_context_overrule"],
+        )
+        # Check if a valid template has been found for this device.
+        if not device.zbx_template_names:
+            summary.record(
+                summary_label,
+                self._template_skip_reason(nb_device, device_config),
+            )
+            return True
 
         logger.debug("Host %s NetBox data: %s", device.name, pformat(dict(nb_device)))
 
@@ -1131,6 +1197,7 @@ class Sync:
         device.set_usermacros()
         device.set_tags()
         device.set_tls()
+        device.set_ipmi()
 
         # Split imports require explicit unique hostnames and must not be collapsed
         # into a virtual chassis hostname.
@@ -1252,7 +1319,7 @@ class Sync:
         azure_subscription = AzureSubscription(
             nb_tenant,
             self.zabbix,
-            logger,
+            self.logger,
             config=self.config,
         )
         status_report.attach_model(report_key, azure_subscription)
@@ -1424,7 +1491,7 @@ class Sync:
         """
         if not self.netbox or not self.zabbix:
             e = "Not able to start sync: No connection to NetBox or Zabbix API."
-            logger.error(e)
+            self.logger.error(e)
             return False
         summary = UnsyncedSummary()
         self.last_unsynced_summary = summary

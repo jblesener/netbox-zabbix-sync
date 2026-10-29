@@ -73,7 +73,9 @@ class Hostgroup:
             format_options["site"] = self.nb.site.name if self.nb.site else None
             format_options["tenant"] = str(self.nb.tenant) if self.nb.tenant else None
             format_options["tenant_group"] = (
-                str(self.nb.tenant.group) if self.nb.tenant else None
+                str(self.nb.tenant.group)
+                if self.nb.tenant and self.nb.tenant.group
+                else None
             )
             format_options["platform"] = (
                 self.nb.platform.name if self.nb.platform else None
@@ -98,9 +100,13 @@ class Hostgroup:
             )
             format_options["rack"] = self.nb.rack.name if self.nb.rack else None
         # Variables only applicable for VM's such as clusters
-        if self.type == "vm" and self.nb.cluster:
-            format_options["cluster"] = self.nb.cluster.name
-            format_options["cluster_type"] = self.nb.cluster.type.name
+        if self.type == "vm":
+            cluster = getattr(self.nb, "cluster", None)
+            if cluster:
+                format_options["cluster"] = cluster.name
+                cluster_type = getattr(cluster, "type", None)
+                if cluster_type:
+                    format_options["cluster_type"] = cluster_type.name
         self.format_options = format_options
         self.logger.debug(
             "Host %s: Resolved properties for use in hostgroups: %s",

@@ -6,7 +6,7 @@ import pytest
 from zabbix_utils import APIRequestError
 
 from netbox_zabbix_sync.modules.device import PhysicalDevice
-from netbox_zabbix_sync.modules.exceptions import SyncExternalError
+from netbox_zabbix_sync.modules.exceptions import SyncExternalError, SyncInventoryError
 from netbox_zabbix_sync.modules.virtual_machine import VirtualMachine
 
 
@@ -123,6 +123,32 @@ def test_vm_primary_agent_interface_retains_legacy_default():
     assert len(interfaces) == 1
     assert interfaces[0]["type"] == "1"
     assert interfaces[0]["port"] == "10050"
+
+
+def test_oob_sync_adds_same_host_interface_without_collapsing_split_imports():
+    host = build_host_object({"zabbix": {"oob_interface_type": 1}})
+    host.config["oob_sync"] = True
+    host.oob_ip = "198.51.100.20"
+
+    interfaces = host.set_interface_details()
+
+    assert [str(interface["type"]) for interface in interfaces] == ["2", "1"]
+    assert [interface["ip"] for interface in interfaces] == [
+        "192.0.2.10",
+        "198.51.100.20",
+    ]
+
+    host.set_cleanup_source("device-oob")
+    assert len(host.set_interface_details()) == 1
+
+
+def test_oob_sync_rejects_a_duplicate_interface_type():
+    host = build_host_object()
+    host.config["oob_sync"] = True
+    host.oob_ip = "198.51.100.20"
+
+    with pytest.raises(SyncInventoryError, match="OOB interface type must differ"):
+        host.set_interface_details()
 
 
 def test_reconciliation_adds_new_interface_and_preserves_matched_id():
