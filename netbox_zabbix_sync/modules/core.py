@@ -3,7 +3,7 @@
 import re
 import ssl
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from os import environ
 from pathlib import Path
 from pprint import pformat
@@ -96,7 +96,7 @@ class UnsyncedSummary:
 
 
 class CleanupSummary:
-    """Collect results from the opt-in deleted-source cleanup pass."""
+    """Collect results from the opt-in owned-host cleanup pass."""
 
     def __init__(self):
         self.removed: list[str] = []
@@ -107,18 +107,18 @@ class CleanupSummary:
     def log(self, log):
         if self.removed:
             log.warning(
-                "Deleted-source cleanup removed %s host(s): %s",
+                "Owned-host cleanup removed %s host(s): %s",
                 len(self.removed),
                 ", ".join(self.removed),
             )
         if self.failures:
             log.error(
-                "Deleted-source cleanup failed for %s host(s): %s",
+                "Owned-host cleanup failed for %s host(s): %s",
                 len(self.failures),
                 ", ".join(self.failures),
             )
         if not self.removed and not self.failures:
-            log.info("Deleted-source cleanup completed without host removals.")
+            log.info("Owned-host cleanup completed without host removals.")
 
 
 class Sync:
@@ -300,17 +300,27 @@ class Sync:
     def _collect_filtered_objects(
         self, endpoint, filters, custom_field_filters=None, object_type="NetBox object"
     ):
-        """Return filtered objects and the complete candidate set for the endpoint."""
+        """Return selected, report-candidate, and custom-field-excluded records."""
         compiled_custom_field_filters = self._compile_custom_field_filters(
             custom_field_filters if custom_field_filters is not None else {},
             object_type,
         )
-        filtered = list(endpoint.filter(**filters))
-        candidates = list(endpoint.all()) if filters else list(filtered)
+        netbox_filtered = list(endpoint.filter(**filters))
+        candidates = list(endpoint.all()) if filters else list(netbox_filtered)
         records_by_id = {self._record_id(record): record for record in candidates}
-        records_by_id.update({self._record_id(record): record for record in filtered})
-        filtered = self._filter_custom_fields(filtered, compiled_custom_field_filters)
-        return filtered, list(records_by_id.values())
+        records_by_id.update(
+            {self._record_id(record): record for record in netbox_filtered}
+        )
+        selected = self._filter_custom_fields(
+            netbox_filtered, compiled_custom_field_filters
+        )
+        selected_ids = {self._record_id(record) for record in selected}
+        custom_field_excluded = [
+            record
+            for record in netbox_filtered
+            if self._record_id(record) not in selected_ids
+        ]
+        return selected, list(records_by_id.values()), custom_field_excluded
 
     def _add_status_target(
         self,
@@ -540,17 +550,39 @@ class Sync:
             (parsed.scheme.casefold(), netloc, parsed.path.rstrip("/"), "", "")
         )
 
-    def _cleanup_deleted_hosts(self):
-        """Remove only this deployment's marked hosts whose NetBox source vanished."""
+    @staticmethod
+    def _clear_filter_excluded_host_link(filter_exclusion, hostid):
+        """Clear a matching NetBox host-ID link after Zabbix confirms deletion."""
+        record = filter_exclusion["record"]
+        custom_field = filter_exclusion["hostid_custom_field"]
+        custom_fields = getattr(record, "custom_fields", None)
+        if not isinstance(custom_fields, Mapping):
+            return False
+        current_hostid = custom_fields.get(custom_field)
+        if current_hostid is None or str(current_hostid) != str(hostid):
+            return False
+        if not isinstance(custom_fields, MutableMapping):
+            raise TypeError(
+                f"NetBox custom fields for {custom_field!r} are not mutable."
+            )
+        custom_fields[custom_field] = None
+        try:
+            record.save()
+        except Exception:
+            custom_fields[custom_field] = current_hostid
+            raise
+        return True
+
+    def _cleanup_deleted_hosts(self, filter_excluded_sources=None):
+        """Remove owned hosts whose source vanished or failed a custom-field filter."""
         if not self.config.get("cleanup_deleted_hosts"):
             return None
 
+        filter_excluded_sources = filter_excluded_sources or {}
         summary = CleanupSummary()
         self.last_cleanup_summary = summary
         if self.netbox is None or self.zabbix is None:
-            logger.error(
-                "Deleted-source cleanup skipped: API connections are unavailable."
-            )
+            logger.error("Owned-host cleanup skipped: API connections are unavailable.")
             return summary
         # pynetbox and zabbix-utils expose their endpoint attributes dynamically,
         # so their library stubs cannot express the chained API calls below.
@@ -558,8 +590,8 @@ class Sync:
         zabbix = cast(Any, self.zabbix)
         instance_id = str(self.config.get("cleanup_instance_id", "default"))
         try:
-            # Deliberately do not use the configured sync filters here: an object
-            # excluded from a normal sync is still a live cleanup source.
+            # Use full inventories to distinguish deleted sources from normal
+            # sync-filter exclusions. Custom-field exclusions are passed separately.
             device_ids = {
                 self._record_id(record) for record in netbox.dcim.devices.filter()
             }
@@ -569,7 +601,7 @@ class Sync:
             }
         except Exception as error:  # Fail closed for any NetBox existence lookup error.
             logger.error(
-                "Deleted-source cleanup skipped: unable to fetch complete NetBox "
+                "Owned-host cleanup skipped: unable to fetch complete NetBox "
                 "device and VM ID sets: %s",
                 error,
             )
@@ -585,7 +617,7 @@ class Sync:
             )
         except (APIRequestError, ProcessingError) as error:
             logger.error(
-                "Deleted-source cleanup skipped: unable to query Zabbix ownership "
+                "Owned-host cleanup skipped: unable to query Zabbix ownership "
                 "tags for instance '%s': %s",
                 instance_id,
                 error,
@@ -599,7 +631,7 @@ class Sync:
             }
         except Exception as error:
             logger.error(
-                "Deleted-source cleanup skipped: unable to fetch the complete NetBox "
+                "Owned-host cleanup skipped: unable to fetch the complete NetBox "
                 "virtualization cluster ID set: %s",
                 error,
             )
@@ -626,42 +658,49 @@ class Sync:
             ]
             if len(instance_values) != 1 or instance_values[0] != instance_id:
                 logger.warning(
-                    "Deleted-source cleanup: skipping host %s with ambiguous or foreign "
+                    "Owned-host cleanup: skipping host %s with ambiguous or foreign "
                     "ownership namespace tags.",
                     label,
                 )
                 continue
             if str(host.get("flags", "0")) == "4":
                 logger.warning(
-                    "Deleted-source cleanup: skipping discovery-owned host %s.", label
+                    "Owned-host cleanup: skipping discovery-owned host %s.", label
                 )
                 continue
             if len(source_values) != 1:
                 logger.warning(
-                    "Deleted-source cleanup: skipping host %s with ambiguous source markers.",
+                    "Owned-host cleanup: skipping host %s with ambiguous source markers.",
                     label,
                 )
                 continue
             marker_match = fullmatch(
-                r"(device|device-oob|vm|ontap-cluster):([1-9][0-9]*)",
+                r"(device|device-oob|vm|ontap-cluster|azure-subscription):"
+                r"([1-9][0-9]*)",
                 source_values[0],
             )
             if not marker_match:
                 logger.warning(
-                    "Deleted-source cleanup: skipping host %s with malformed or foreign "
+                    "Owned-host cleanup: skipping host %s with malformed or foreign "
                     "source marker '%s'.",
                     label,
                     source_values[0],
                 )
                 continue
             source_type, source_id = marker_match.groups()
-            if int(source_id) in source_sets[source_type]:
+            filter_exclusion = filter_excluded_sources.get(source_values[0])
+            if source_type == "azure-subscription":
+                if filter_exclusion is None:
+                    continue
+            elif (
+                int(source_id) in source_sets[source_type] and filter_exclusion is None
+            ):
                 continue
             try:
                 zabbix.host.delete(host["hostid"])
             except (APIRequestError, ProcessingError) as error:
                 logger.error(
-                    "Deleted-source cleanup: unable to delete host %s (ID:%s): %s",
+                    "Owned-host cleanup: unable to delete host %s (ID:%s): %s",
                     label,
                     host.get("hostid"),
                     error,
@@ -675,13 +714,29 @@ class Sync:
                         "source_id": int(source_id),
                         "status": host.get("status"),
                         "interfaces": host.get("interfaces"),
+                        "report_key": (
+                            filter_exclusion.get("report_key")
+                            if filter_exclusion
+                            else None
+                        ),
+                        "custom_field_excluded": filter_exclusion is not None,
+                        "reason": (
+                            "Custom-field filter cleanup failed."
+                            if filter_exclusion
+                            else "Owned-host cleanup failed."
+                        ),
                     }
                 )
                 continue
             logger.info(
-                "Deleted-source cleanup: deleted host %s (ID:%s) for missing %s %s.",
+                "Owned-host cleanup: deleted host %s (ID:%s) for %s source %s:%s.",
                 label,
                 host.get("hostid"),
+                (
+                    "custom-field filter exclusion"
+                    if filter_exclusion
+                    else "missing NetBox source"
+                ),
                 source_type,
                 source_id,
             )
@@ -692,8 +747,50 @@ class Sync:
                     "hostid": host.get("hostid"),
                     "source_type": source_type,
                     "source_id": int(source_id),
+                    "report_key": (
+                        filter_exclusion.get("report_key") if filter_exclusion else None
+                    ),
+                    "custom_field_excluded": filter_exclusion is not None,
                 }
             )
+            if filter_exclusion:
+                try:
+                    link_cleared = self._clear_filter_excluded_host_link(
+                        filter_exclusion, host["hostid"]
+                    )
+                except Exception as error:
+                    logger.error(
+                        "Owned-host cleanup: deleted host %s (ID:%s) but could not "
+                        "clear NetBox host-ID custom field '%s': %s",
+                        label,
+                        host.get("hostid"),
+                        filter_exclusion["hostid_custom_field"],
+                        error,
+                    )
+                    summary.failures.append(label)
+                    summary.failure_targets.append(
+                        {
+                            "name": label,
+                            "hostid": host.get("hostid"),
+                            "source_type": source_type,
+                            "source_id": int(source_id),
+                            "status": None,
+                            "interfaces": None,
+                            "report_key": filter_exclusion.get("report_key"),
+                            "reason": (
+                                "Zabbix host was deleted but its NetBox host-ID "
+                                "custom field could not be cleared."
+                            ),
+                        }
+                    )
+                else:
+                    if not link_cleared:
+                        logger.warning(
+                            "Owned-host cleanup: NetBox host-ID custom field '%s' "
+                            "does not reference deleted host %s; leaving it unchanged.",
+                            filter_exclusion["hostid_custom_field"],
+                            host.get("hostid"),
+                        )
         summary.log(logger)
         return summary
 
@@ -1167,6 +1264,9 @@ class Sync:
             return "skipped", "Azure subscription validation failed"
         azure_subscription.set_usermacros()
         had_linked_hostid = bool(azure_subscription.zabbix_id)
+        cleanup_ownership = bool(
+            self.config.get("cleanup_deleted_hosts") and had_linked_hostid
+        )
         adopted = azure_subscription.adopt_existing_zabbix_host()
         host_consistent = False
         if azure_subscription.zabbix_id:
@@ -1174,6 +1274,7 @@ class Sync:
                 zabbix_groups,
                 zabbix_templates,
                 self.config["create_hostgroups"],
+                cleanup_ownership=cleanup_ownership,
             )
         if not host_consistent and (had_linked_hostid or adopted):
             adopted = azure_subscription.adopt_existing_zabbix_host()
@@ -1182,6 +1283,7 @@ class Sync:
                     zabbix_groups,
                     zabbix_templates,
                     self.config["create_hostgroups"],
+                    cleanup_ownership=cleanup_ownership,
                 )
         if host_consistent:
             return "synced", None
@@ -1362,7 +1464,11 @@ class Sync:
         dev_filter_combined = self._combine_filters(
             self.config["nb_device_filter"], device_filter
         )
-        netbox_devices, all_netbox_devices = self._collect_filtered_objects(
+        (
+            netbox_devices,
+            all_netbox_devices,
+            custom_field_excluded_devices,
+        ) = self._collect_filtered_objects(
             self.netbox.dcim.devices,
             dev_filter_combined,
             (
@@ -1373,11 +1479,16 @@ class Sync:
         )
         netbox_vms = []
         all_netbox_vms = []
+        custom_field_excluded_vms = []
         if self.config["sync_vms"]:
             vm_filter_combined = self._combine_filters(
                 self.config["nb_vm_filter"], vm_filter
             )
-            netbox_vms, all_netbox_vms = self._collect_filtered_objects(
+            (
+                netbox_vms,
+                all_netbox_vms,
+                custom_field_excluded_vms,
+            ) = self._collect_filtered_objects(
                 self.netbox.virtualization.virtual_machines,
                 vm_filter_combined,
                 (
@@ -1388,10 +1499,12 @@ class Sync:
             )
         netbox_ontap_clusters = []
         all_netbox_ontap_clusters = []
+        custom_field_excluded_clusters = []
         if self.config["sync_ontap_clusters"]:
             (
                 netbox_ontap_clusters,
                 all_netbox_ontap_clusters,
+                custom_field_excluded_clusters,
             ) = self._collect_filtered_objects(
                 self.netbox.virtualization.clusters,
                 self.config["nb_ontap_cluster_filter"],
@@ -1403,10 +1516,12 @@ class Sync:
             )
         netbox_azure_subscriptions = []
         all_netbox_azure_subscriptions = []
+        custom_field_excluded_tenants = []
         if self.config["sync_azure_subscriptions"]:
             (
                 netbox_azure_subscriptions,
                 all_netbox_azure_subscriptions,
+                custom_field_excluded_tenants,
             ) = self._collect_filtered_objects(
                 self.netbox.tenancy.tenants,
                 {"tag": self.config["azure_tag"]},
@@ -1484,6 +1599,73 @@ class Sync:
                 else "Does not match configured Azure subscription sync filters.",
             )
             report_keys_by_label[label] = key
+
+        custom_field_excluded_sources = {}
+
+        def track_filter_exclusion(record, source_type, hostid_custom_field, key):
+            marker = f"{source_type}:{self._record_id(record)}"
+            custom_field_excluded_sources[marker] = {
+                "record": record,
+                "hostid_custom_field": hostid_custom_field,
+                "report_key": key,
+            }
+
+        for nb_device in custom_field_excluded_devices:
+            device_label = self._summary_label("Device", nb_device.name)
+            track_filter_exclusion(
+                nb_device,
+                "device",
+                self.config["device_cf"],
+                report_keys_by_label[device_label],
+            )
+            context = getattr(nb_device, "config_context", None)
+            zabbix_context = (
+                context.get("zabbix", {}) if isinstance(context, dict) else {}
+            )
+            oob_context = (
+                zabbix_context.get("oob") if isinstance(zabbix_context, dict) else None
+            )
+            oob_name = (
+                self._build_oob_hostname(nb_device.name, oob_context)
+                if isinstance(oob_context, dict)
+                else nb_device.name
+            )
+            oob_key = report_keys_by_label.get(
+                self._summary_label("Device OOB", oob_name)
+            )
+            track_filter_exclusion(
+                nb_device,
+                "device-oob",
+                self.config["oob_device_cf"],
+                oob_key,
+            )
+
+        for nb_vm in custom_field_excluded_vms:
+            label = self._summary_label("VM", nb_vm.name)
+            track_filter_exclusion(
+                nb_vm,
+                "vm",
+                self.config["device_cf"],
+                report_keys_by_label[label],
+            )
+        for nb_cluster in custom_field_excluded_clusters:
+            if not self._is_ontap_cluster(nb_cluster):
+                continue
+            label = self._summary_label("ONTAP cluster", nb_cluster.name)
+            track_filter_exclusion(
+                nb_cluster,
+                "ontap-cluster",
+                self.config["device_cf"],
+                report_keys_by_label[label],
+            )
+        for nb_tenant in custom_field_excluded_tenants:
+            label = self._summary_label("Azure subscription", nb_tenant.name)
+            track_filter_exclusion(
+                nb_tenant,
+                "azure-subscription",
+                self.config["azure_zabbix_hostid_cf"],
+                report_keys_by_label[label],
+            )
 
         netbox_site_groups = convert_recordset(self.netbox.dcim.site_groups.all())
         netbox_regions = convert_recordset(self.netbox.dcim.regions.all())
@@ -1632,26 +1814,50 @@ class Sync:
                             status_report, oob_key, summary, oob_label
                         )
 
-        cleanup_summary = self._cleanup_deleted_hosts()
+        cleanup_summary = self._cleanup_deleted_hosts(custom_field_excluded_sources)
         if cleanup_summary is not None:
             for target in cleanup_summary.removed_targets:
+                report_key = target.get("report_key")
+                if report_key is not None:
+                    status_report.set_result(
+                        report_key,
+                        "removed",
+                        "Removed because the object failed a custom-field filter.",
+                    )
+                    status_report.set_zabbix_status(report_key, None)
+                    continue
                 key = status_report.add_target(
                     target_type=target["source_type"].replace("-", "_"),
                     name=target["name"],
                     netbox_id=target["source_id"],
                     zabbix_hostid=target["hostid"],
                     sync_result="removed",
-                    reason="Removed by deleted-source cleanup.",
+                    reason=(
+                        "Removed because the source failed a custom-field filter."
+                        if target.get("custom_field_excluded")
+                        else "Removed by owned-host cleanup."
+                    ),
                 )
                 status_report.set_zabbix_status(key, None)
             for target in cleanup_summary.failure_targets:
+                report_key = target.get("report_key")
+                if report_key is not None:
+                    status_report.set_result(
+                        report_key,
+                        "failed",
+                        target.get("reason", "Custom-field filter cleanup failed."),
+                    )
+                    status_report.set_zabbix_status(
+                        report_key, target["status"], target["interfaces"]
+                    )
+                    continue
                 key = status_report.add_target(
                     target_type=target["source_type"].replace("-", "_"),
                     name=target["name"],
                     netbox_id=target["source_id"],
                     zabbix_hostid=target["hostid"],
                     sync_result="failed",
-                    reason="Deleted-source cleanup failed.",
+                    reason=target.get("reason", "Owned-host cleanup failed."),
                 )
                 status_report.set_zabbix_status(
                     key, target["status"], target["interfaces"]

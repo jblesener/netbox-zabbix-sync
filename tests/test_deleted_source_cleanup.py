@@ -1,5 +1,6 @@
-"""Tests for opt-in cleanup of hosts whose NetBox source has disappeared."""
+"""Tests for opt-in cleanup of missing or filter-excluded owned hosts."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from zabbix_utils import APIRequestError
@@ -56,6 +57,116 @@ def test_cleanup_deletes_only_sources_missing_from_complete_inventory():
     assert syncer.zabbix.host.get.call_args.kwargs["tags"] == [
         {"tag": CLEANUP_INSTANCE_TAG, "value": "deployment-a"}
     ]
+
+
+def test_cleanup_deletes_custom_field_excluded_host_and_clears_link():
+    record = SimpleNamespace(
+        id=7,
+        custom_fields={"zabbix_hostid": "1"},
+        save=MagicMock(),
+    )
+    report_key = ("device", "7", "filtered-device")
+    syncer = _syncer(devices=[{"id": 7}], hosts=[_owned_host(1, "device:7")])
+
+    summary = syncer._cleanup_deleted_hosts(
+        {
+            "device:7": {
+                "record": record,
+                "hostid_custom_field": "zabbix_hostid",
+                "report_key": report_key,
+            }
+        }
+    )
+
+    assert summary.removed == ["host-1"]
+    assert summary.failures == []
+    assert record.custom_fields["zabbix_hostid"] is None
+    record.save.assert_called_once_with()
+    assert summary.removed_targets[0]["report_key"] == report_key
+
+
+def test_cleanup_does_not_clear_link_when_zabbix_delete_fails():
+    record = SimpleNamespace(
+        id=7,
+        custom_fields={"zabbix_hostid": "1"},
+        save=MagicMock(),
+    )
+    report_key = ("device", "7", "filtered-device")
+    syncer = _syncer(devices=[{"id": 7}], hosts=[_owned_host(1, "device:7")])
+    syncer.zabbix.host.delete.side_effect = APIRequestError("no permission")
+
+    summary = syncer._cleanup_deleted_hosts(
+        {
+            "device:7": {
+                "record": record,
+                "hostid_custom_field": "zabbix_hostid",
+                "report_key": report_key,
+            }
+        }
+    )
+
+    assert summary.removed == []
+    assert summary.failures == ["host-1"]
+    assert record.custom_fields["zabbix_hostid"] == "1"
+    record.save.assert_not_called()
+    assert summary.failure_targets[0]["report_key"] == report_key
+
+
+def test_cleanup_reports_netbox_link_save_failure_and_restores_link():
+    record = SimpleNamespace(
+        id=7,
+        custom_fields={"zabbix_hostid": "1"},
+        save=MagicMock(side_effect=RuntimeError("NetBox unavailable")),
+    )
+    syncer = _syncer(devices=[{"id": 7}], hosts=[_owned_host(1, "device:7")])
+
+    summary = syncer._cleanup_deleted_hosts(
+        {
+            "device:7": {
+                "record": record,
+                "hostid_custom_field": "zabbix_hostid",
+                "report_key": ("device", "7", "filtered-device"),
+            }
+        }
+    )
+
+    assert summary.removed == ["host-1"]
+    assert summary.failures == ["host-1"]
+    assert record.custom_fields["zabbix_hostid"] == "1"
+    assert "could not be cleared" in summary.failure_targets[0]["reason"]
+
+
+def test_cleanup_can_remove_filter_excluded_azure_subscription_hosts():
+    tenant = SimpleNamespace(
+        id=9,
+        custom_fields={"zabbix_hostid": "1"},
+        save=MagicMock(),
+    )
+    syncer = _syncer(hosts=[_owned_host(1, "azure-subscription:9")])
+
+    summary = syncer._cleanup_deleted_hosts(
+        {
+            "azure-subscription:9": {
+                "record": tenant,
+                "hostid_custom_field": "zabbix_hostid",
+                "report_key": ("azure_subscription", "9", "filtered-tenant"),
+            }
+        }
+    )
+
+    assert summary.removed == ["host-1"]
+    assert tenant.custom_fields["zabbix_hostid"] is None
+    tenant.save.assert_called_once_with()
+
+
+def test_filter_exclusion_cleanup_remains_opt_in():
+    syncer = _syncer(hosts=[_owned_host(1, "device:7")])
+    syncer.config["cleanup_deleted_hosts"] = False
+
+    summary = syncer._cleanup_deleted_hosts({"device:7": {}})
+
+    assert summary is None
+    syncer.zabbix.host.delete.assert_not_called()
 
 
 def test_cleanup_skips_ambiguous_malformed_discovery_and_foreign_hosts():

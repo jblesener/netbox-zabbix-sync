@@ -161,7 +161,7 @@ _STR_ARGS = [
     ),
     (
         "cleanup_instance_id",
-        "Unique deployment ID used to namespace deleted-source cleanup ownership.",
+        "Unique deployment ID used to namespace owned-host cleanup.",
         "ID",
     ),
 ]

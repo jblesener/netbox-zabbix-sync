@@ -247,8 +247,11 @@ and searches within each value. For list-valued fields, any member may match.
 Missing, null, and empty values pass their rule. Existing NetBox API filters
 still apply, and Azure subscription Tenants must still have the configured
 `azure_tag`. Objects excluded by these rules are reported as
-`excluded_by_filter`; deleted-source cleanup continues to use the full NetBox
-inventory. Invalid regex patterns raise an explicit configuration error.
+`excluded_by_filter`. When `cleanup_deleted_hosts` is enabled, an owned Zabbix
+host excluded by a custom-field rule is deleted and its matching NetBox host-ID
+custom field is cleared. This cleanup does not apply to objects excluded only by
+NetBox API filters. Invalid regex patterns raise an explicit configuration
+error.
 
 ## Virtual Machine (VM) Syncing
 
@@ -835,12 +838,16 @@ response preserves the NetBox field and skips that object's sync; these
 failures are never treated as confirmation that a host is absent. Auxiliary
 LLD/adopted-host ID fields are not checked by this option.
 
-### Cleanup hosts whose NetBox source was deleted
+### Clean up owned Zabbix hosts
 
-By default, the sync never removes a host merely because its NetBox device or
-VM is absent. To opt in, enable `cleanup_deleted_hosts`. The sync marks hosts
-it owns with reserved Zabbix tags and, on later runs, removes only marked hosts
-whose original NetBox device, OOB import, or VM no longer exists. Existing
+By default, the sync never removes a host merely because its NetBox source is
+absent or excluded by a custom-field filter. To opt in, enable
+`cleanup_deleted_hosts`. The sync marks hosts it owns with reserved Zabbix tags
+and removes only hosts carrying this deployment's ownership tags. Cleanup
+removes marked hosts whose original device, OOB import, VM, or ONTAP cluster no
+longer exists, as well as marked hosts excluded by a custom-field filter.
+Successful filter-exclusion cleanup clears the matching NetBox host-ID custom
+field. Objects excluded only by NetBox API filters are not deleted. Existing
 status-based removal behavior is unchanged.
 
 ```python
@@ -849,10 +856,11 @@ cleanup_instance_id = "tokyo-production"
 ```
 
 Every deployment sharing a Zabbix instance must use a unique
-`cleanup_instance_id`. The full unfiltered NetBox device and VM inventories are
-used for this existence check, so normal sync filters do not cause deletion.
-Discovery-created and hosts adopted during the current run are never marked by
-this feature. Azure subscription hosts are not included.
+`cleanup_instance_id`. Full unfiltered NetBox device, VM, and ONTAP cluster
+inventories are used for source-existence checks, so NetBox API filters do not
+cause deletion. Azure subscription hosts are eligible for custom-field filter
+cleanup, but Azure source deletion is not checked. Discovery-created hosts and
+hosts adopted during the current run are not marked by this feature.
 
 #### Device tags
 

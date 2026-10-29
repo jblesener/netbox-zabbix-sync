@@ -9,6 +9,7 @@ from typing import Any
 
 from zabbix_utils import APIRequestError
 
+from netbox_zabbix_sync.modules.device import CLEANUP_INSTANCE_TAG, CLEANUP_SOURCE_TAG
 from netbox_zabbix_sync.modules.exceptions import SyncExternalError, SyncInventoryError
 from netbox_zabbix_sync.modules.tools import remove_duplicates, sanatize_log_output
 
@@ -28,6 +29,7 @@ class AzureSubscription:
         self.logger = logger if logger else getLogger(__name__)
         self.config = config or {}
         self.id = nb_tenant.id
+        self.cleanup_source_marker = f"azure-subscription:{self.id}"
         self.name = nb_tenant.name
         self.visible_name = None
         self.use_visible_name = False
@@ -284,6 +286,43 @@ class AzureSubscription:
                 raise SyncInventoryError(message)
         self.zbx_template_prepper(templates)
 
+    def _cleanup_ownership_tags(self):
+        """Return the reserved ownership tags when deleted-host cleanup is enabled."""
+        if not self.config.get("cleanup_deleted_hosts"):
+            return []
+        return [
+            {
+                "tag": CLEANUP_INSTANCE_TAG,
+                "value": str(self.config.get("cleanup_instance_id", "default")),
+            },
+            {"tag": CLEANUP_SOURCE_TAG, "value": self.cleanup_source_marker},
+        ]
+
+    @staticmethod
+    def _tag_values(tags):
+        """Normalize Zabbix tags to the fields accepted by host.create/update."""
+        return [
+            {"tag": tag["tag"], "value": tag["value"]}
+            for tag in tags
+            if isinstance(tag, Mapping) and "tag" in tag and "value" in tag
+        ]
+
+    def _sync_cleanup_ownership(self, host):
+        """Add this deployment's ownership tags without replacing other host tags."""
+        ownership_tags = self._cleanup_ownership_tags()
+        if not ownership_tags or str(host.get("flags", "0")) == "4":
+            return
+        existing_tags = self._tag_values(host.get("tags", []) or [])
+        desired_tags = list(existing_tags)
+        for tag in ownership_tags:
+            if tag not in desired_tags:
+                desired_tags.append(tag)
+        if sorted(existing_tags, key=lambda tag: (tag["tag"], tag["value"])) == sorted(
+            desired_tags, key=lambda tag: (tag["tag"], tag["value"])
+        ):
+            return
+        self.update_zabbix_host(tags=desired_tags)
+
     def create_in_zabbix(self, groups, templates, create_hostgroups):
         """Create the Azure subscription host in Zabbix."""
         if self._zabbix_hostname_exists():
@@ -304,6 +343,9 @@ class AzureSubscription:
             ],
             "macros": self.macros,
         }
+        cleanup_tags = self._cleanup_ownership_tags()
+        if cleanup_tags:
+            create_data["tags"] = cleanup_tags
         try:
             host = self.zabbix.host.create(**create_data)
             self.zabbix_id = host["hostids"][0]
@@ -340,7 +382,9 @@ class AzureSubscription:
             "Host %s: updated with data %s.", self.name, sanatize_log_output(kwargs)
         )
 
-    def consistency_check(self, groups, templates, create_hostgroups) -> bool:
+    def consistency_check(
+        self, groups, templates, create_hostgroups, cleanup_ownership=False
+    ) -> bool:
         """Reconcile an existing Zabbix host with NetBox Tenant data."""
         clear_stale_hostids = bool(self.config.get("clear_stale_zabbix_hostids", False))
         if not clear_stale_hostids:
@@ -353,6 +397,7 @@ class AzureSubscription:
                 selectHostGroups=["groupid"],
                 selectParentTemplates=["templateid"],
                 selectMacros=["macro", "value", "type", "description"],
+                selectTags=["tag", "value"],
             )
         except APIRequestError as error:
             if not clear_stale_hostids:
@@ -436,6 +481,8 @@ class AzureSubscription:
         if not self._macros_in_sync(host["macros"]):
             self.logger.info("Host %s: Usermacros OUT of sync.", self.name)
             self.update_zabbix_host(macros=self.macros)
+        if cleanup_ownership:
+            self._sync_cleanup_ownership(host)
         return True
 
     def _macros_in_sync(self, zabbix_macros):

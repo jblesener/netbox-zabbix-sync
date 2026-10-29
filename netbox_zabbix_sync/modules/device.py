@@ -193,7 +193,7 @@ class PhysicalDevice:
 
     @staticmethod
     def _is_cleanup_tag(tag):
-        """Return whether a tag is reserved for deleted-source cleanup ownership."""
+        """Return whether a tag is reserved for owned-host cleanup."""
         return tag.get("tag") in {CLEANUP_INSTANCE_TAG, CLEANUP_SOURCE_TAG}
 
     @staticmethod
@@ -240,7 +240,7 @@ class PhysicalDevice:
         ):
             return
         self.logger.info(
-            "Host %s: Adding deleted-source cleanup ownership tags.", self.name
+            "Host %s: Adding owned-host cleanup ownership tags.", self.name
         )
         self.update_zabbix_host(tags=desired)
 

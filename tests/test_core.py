@@ -13,6 +13,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from zabbix_utils import APIRequestError
 
 from netbox_zabbix_sync.modules.core import Sync, UnsyncedSummary, logger
+from netbox_zabbix_sync.modules.device import CLEANUP_INSTANCE_TAG, CLEANUP_SOURCE_TAG
 from netbox_zabbix_sync.modules.exceptions import SyncError
 
 SNMP_INTERFACE_TYPE = 2
@@ -785,7 +786,12 @@ class TestSyncAzureSubscriptions(unittest.TestCase):
         self._setup_netbox_mock(mock_api, tenants=[tenant])
         mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
 
-        syncer = Sync(self._sync_config())
+        syncer = Sync(
+            self._sync_config(
+                cleanup_deleted_hosts=True,
+                cleanup_instance_id="deployment-a",
+            )
+        )
         syncer.connect(
             "http://netbox.local",
             "nb_token",
@@ -802,6 +808,19 @@ class TestSyncAzureSubscriptions(unittest.TestCase):
         self.assertEqual(create_kwargs["interfaces"], [])
         self.assertEqual(create_kwargs["groups"], [{"groupid": "10"}])
         self.assertEqual(create_kwargs["templates"], [{"templateid": "20"}])
+        self.assertEqual(
+            create_kwargs["tags"],
+            [
+                {
+                    "tag": CLEANUP_INSTANCE_TAG,
+                    "value": "deployment-a",
+                },
+                {
+                    "tag": CLEANUP_SOURCE_TAG,
+                    "value": f"azure-subscription:{tenant.id}",
+                },
+            ],
+        )
         self.assertEqual(
             create_kwargs["macros"],
             [
@@ -834,6 +853,61 @@ class TestSyncAzureSubscriptions(unittest.TestCase):
         self.assertEqual(tenant.custom_fields["zabbix_hostid"], 30)
         mock_zabbix.hostgroup.create.assert_any_call(name="Azure/Subscriptions")
         mock_zabbix.hostgroup.create.assert_any_call(name="Azure")
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_existing_linked_azure_host_gets_cleanup_ownership_tags(
+        self, mock_api, mock_zabbix_api
+    ):
+        tenant = MockNetboxTenant(zabbix_hostid=42)
+        self._setup_netbox_mock(mock_api, tenants=[tenant])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        mock_zabbix.hostgroup.get.return_value = [
+            {"groupid": "10", "name": "Azure/Subscriptions"}
+        ]
+        mock_zabbix.host.get.return_value = [
+            {
+                "hostid": "42",
+                "host": "test-subscription",
+                "name": "test-subscription",
+                "parentTemplates": [{"templateid": "20"}],
+                "hostgroups": [{"groupid": "10"}],
+                "groups": [{"groupid": "10"}],
+                "interfaces": [],
+                "macros": [],
+                "tags": [],
+            }
+        ]
+
+        syncer = Sync(
+            self._sync_config(
+                cleanup_deleted_hosts=True,
+                cleanup_instance_id="deployment-a",
+            )
+        )
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        mock_zabbix.host.update.assert_any_call(
+            hostid=42,
+            tags=[
+                {
+                    "tag": CLEANUP_INSTANCE_TAG,
+                    "value": "deployment-a",
+                },
+                {
+                    "tag": CLEANUP_SOURCE_TAG,
+                    "value": "azure-subscription:1",
+                },
+            ],
+        )
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
@@ -5196,7 +5270,7 @@ class TestCustomFieldFilters(unittest.TestCase):
         endpoint = MagicMock()
         endpoint.filter.return_value = records
 
-        selected, candidates = Sync()._collect_filtered_objects(
+        selected, candidates, custom_field_excluded = Sync()._collect_filtered_objects(
             endpoint,
             {},
             {"environment": "(Dev|Stage)", "owner": "operations"},
@@ -5208,8 +5282,32 @@ class TestCustomFieldFilters(unittest.TestCase):
             {1, 3, 4, 6, 7, 8},
         )
         self.assertEqual({record.id for record in candidates}, set(range(1, 9)))
+        self.assertEqual(
+            {record.id for record in custom_field_excluded},
+            {2, 5},
+        )
         endpoint.filter.assert_called_once_with()
         endpoint.all.assert_not_called()
+
+    def test_api_filter_exclusions_are_not_custom_field_exclusions(self):
+        api_filtered_in = SimpleNamespace(id=1, custom_fields={"environment": "Dev"})
+        api_filtered_out = SimpleNamespace(
+            id=2, custom_fields={"environment": "Production"}
+        )
+        endpoint = MagicMock()
+        endpoint.filter.return_value = [api_filtered_in]
+        endpoint.all.return_value = [api_filtered_in, api_filtered_out]
+
+        selected, candidates, custom_field_excluded = Sync()._collect_filtered_objects(
+            endpoint,
+            {"site": "HQ"},
+            {"environment": "Dev"},
+            "device",
+        )
+
+        self.assertEqual(selected, [api_filtered_in])
+        self.assertEqual(candidates, [api_filtered_in, api_filtered_out])
+        self.assertEqual(custom_field_excluded, [])
 
     def test_invalid_custom_field_regex_fails_before_netbox_query(self):
         endpoint = MagicMock()
@@ -5236,7 +5334,7 @@ class TestCustomFieldFilters(unittest.TestCase):
         endpoint = MagicMock()
         endpoint.filter.return_value = records
 
-        selected, _ = Sync()._collect_filtered_objects(
+        selected, _, custom_field_excluded = Sync()._collect_filtered_objects(
             endpoint,
             {},
             (
@@ -5247,6 +5345,10 @@ class TestCustomFieldFilters(unittest.TestCase):
         )
 
         self.assertEqual({record.id for record in selected}, {1, 3})
+        self.assertEqual(
+            {record.id for record in custom_field_excluded},
+            {2, 4},
+        )
 
 
 class TestUnsyncedObjectSummary(unittest.TestCase):
@@ -5323,6 +5425,70 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
             all(target["sync_result"] == "excluded_by_filter" for target in targets)
         )
         syncer.netbox.tenancy.tenants.filter.assert_called_once_with(tag="azure")
+
+    def test_custom_field_exclusion_cleans_owned_host_and_updates_status(self):
+        device = MockNetboxDevice(name="filtered-device", zabbix_hostid=101)
+        device.custom_fields["zabbix_oob_hostid"] = 102
+        device.custom_fields["environment"] = "Production"
+        syncer = self._syncer(
+            devices=[device],
+            config={
+                "nb_device_custom_field_filter": {"environment": "Dev"},
+                "cleanup_deleted_hosts": True,
+                "cleanup_instance_id": "deployment-a",
+            },
+        )
+        syncer.netbox.dcim.devices.all.return_value = [device]
+        syncer.zabbix.host.get.return_value = [
+            {
+                "hostid": "101",
+                "host": "filtered-device",
+                "flags": "0",
+                "tags": [
+                    {"tag": CLEANUP_INSTANCE_TAG, "value": "deployment-a"},
+                    {"tag": CLEANUP_SOURCE_TAG, "value": "device:1"},
+                ],
+            },
+            {
+                "hostid": "102",
+                "host": "filtered-device-oob",
+                "flags": "0",
+                "tags": [
+                    {"tag": CLEANUP_INSTANCE_TAG, "value": "deployment-a"},
+                    {"tag": CLEANUP_SOURCE_TAG, "value": "device-oob:1"},
+                ],
+            },
+        ]
+
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ),
+        ):
+            self.assertTrue(syncer.start())
+
+        self.assertEqual(
+            syncer.zabbix.host.delete.call_args_list[0].args,
+            ("101",),
+        )
+        self.assertEqual(
+            syncer.zabbix.host.delete.call_args_list[1].args,
+            ("102",),
+        )
+        self.assertIsNone(device.custom_fields["zabbix_hostid"])
+        self.assertIsNone(device.custom_fields["zabbix_oob_hostid"])
+        targets = syncer.last_status_report.document()["targets"]
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(
+            {target["type"] for target in targets},
+            {"device", "device_oob"},
+        )
+        self.assertTrue(all(target["sync_result"] == "removed" for target in targets))
+        self.assertTrue(
+            all("custom-field filter" in target["reason"] for target in targets)
+        )
 
     def test_reports_missing_primary_ip_for_device(self):
         device = MockNetboxDevice(name="no-primary-ip")
