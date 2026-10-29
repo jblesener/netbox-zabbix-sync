@@ -28,6 +28,7 @@ def test_load_config_defaults():
         assert config == DEFAULT_CONFIG
         assert config["templates_config_context"] is False
         assert config["create_hostgroups"] is True
+        assert config["fqdn_domain_cf"] == "management_domain"
         assert config["sync_status_instance_id"] == ""
         assert config["vm_hostgroup_fallback"] == "MissingGroup"
         # TLS settings default to disabled / no encryption
@@ -92,18 +93,17 @@ def test_load_env_variables():
     """Test that load_config properly loads values from environment variables"""
 
     # Mock env variable loading to return values for specific keys
+    mock_values = {
+        "sync_vms": True,
+        "create_journal": True,
+        "cleanup_deleted_hosts": "false",
+        "cleanup_instance_id": "deployment-a",
+        "clear_stale_zabbix_hostids": "true",
+        "fqdn_domain_cf": "dns_suffix",
+    }
+
     def mock_load_env(key):
-        if key == "sync_vms":
-            return True
-        if key == "create_journal":
-            return True
-        if key == "cleanup_deleted_hosts":
-            return "false"
-        if key == "cleanup_instance_id":
-            return "deployment-a"
-        if key == "clear_stale_zabbix_hostids":
-            return "true"
-        return None
+        return mock_values.get(key)
 
     with (
         patch(
@@ -121,6 +121,7 @@ def test_load_env_variables():
         assert config["cleanup_deleted_hosts"] is False
         assert config["cleanup_instance_id"] == "deployment-a"
         assert config["clear_stale_zabbix_hostids"] is True
+        assert config["fqdn_domain_cf"] == "dns_suffix"
         # Unchanged values should remain as defaults
         assert config["templates_config_context"] is False
 

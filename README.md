@@ -359,6 +359,22 @@ these macros:
 
 ## Config file
 
+### Host name FQDN normalization
+
+The shared device host sync can append a NetBox custom-field domain to
+unqualified device, VM, and ONTAP cluster names before using them as Zabbix
+technical host names:
+
+```python
+fqdn_domain_cf = "management_domain"
+```
+
+Set this to the custom-field name containing the DNS domain. A name with any
+dot is treated as already qualified, kept unchanged, and logged as a warning.
+If the custom field is missing or empty, the original name is synced with a
+warning. Only the name sent to Zabbix changes; the NetBox object is not modified.
+The scalar setting can also be overridden with `NBZX_FQDN_DOMAIN_CF`.
+
 ### Hostgroup
 
 Setting the `create_hostgroups` variable to `False` requires manual hostgroup

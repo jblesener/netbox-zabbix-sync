@@ -14,6 +14,8 @@ device_cf = "zabbix_hostid"
 # Used by config-context split imports when importing a device's oob_ip
 # as a separate Zabbix host.
 oob_device_cf = "zabbix_oob_hostid"
+# NetBox custom field containing the domain appended to unqualified host names.
+fqdn_domain_cf = "management_domain"
 
 # Zabbix host description
 # The following options are available for the description of all created hosts in Zabbix

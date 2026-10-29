@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
     "template_cf": "zabbix_template",
     "device_cf": "zabbix_hostid",
     "oob_device_cf": "zabbix_oob_hostid",
+    "fqdn_domain_cf": "management_domain",
     "proxy_cf": False,
     "proxy_group_cf": False,
     "clustering": False,

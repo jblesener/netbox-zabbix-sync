@@ -849,6 +849,7 @@ class Sync:
             logger,
             config=self.config,
         )
+        vm.normalize_hostname()
         status_report.attach_model(report_key, vm)
         vm.set_cleanup_source(source_type)
         linked_before_run = bool(vm.zabbix_id)
@@ -1053,6 +1054,7 @@ class Sync:
                     intentional=True,
                 )
                 return True
+        device.normalize_hostname()
         # Checks if device is in cleanup state
         if device.status in device_config["zabbix_device_removal"]:
             if device.zabbix_id:

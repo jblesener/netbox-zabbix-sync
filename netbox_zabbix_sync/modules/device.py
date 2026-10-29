@@ -269,7 +269,10 @@ class PhysicalDevice:
             self.logger.error(e)
             raise SyncInventoryError(e)
 
-        # Validate hostname format.
+        self._validate_hostname()
+
+    def _validate_hostname(self):
+        """Use a safe technical name when the current host name is unsupported."""
         self.use_visible_name = False
         if not self._hostname_supported_by_zabbix(self.name):
             self.name = f"NETBOX_ID{self.id}"
@@ -282,6 +285,35 @@ class PhysicalDevice:
                 self.name,
                 self.visible_name,
             )
+
+    def normalize_hostname(self):
+        """Append the configured NetBox domain to an unqualified Zabbix host name."""
+        if self.use_visible_name:
+            return
+        if "." in self.name:
+            self.logger.warning(
+                "Host %s is already fully qualified; keeping its name unchanged.",
+                self.name,
+            )
+            return
+
+        domain_cf = self.config.get("fqdn_domain_cf", "management_domain")
+        custom_fields = getattr(self.nb, "custom_fields", None)
+        domain = (
+            custom_fields.get(domain_cf) if isinstance(custom_fields, Mapping) else None
+        )
+        domain = str(domain).strip() if domain is not None else ""
+        if not domain:
+            self.logger.warning(
+                "Host %s: NetBox custom field %s is missing or empty; "
+                "syncing without FQDN normalization.",
+                self.name,
+                domain_cf,
+            )
+            return
+
+        self.name = f"{self.name}.{domain}"
+        self._validate_hostname()
 
     def _requires_primary_ip(self):
         """Return whether this import type needs an interface address."""

@@ -1265,6 +1265,7 @@ class TestDeviceHandeling(unittest.TestCase):
             name="SW01N0",
             virtual_chassis=virtual_chassis,
         )
+        device.custom_fields["management_domain"] = "example.com"
 
         # Setup NetBox mock with a site for hostgroup
         mock_netbox = self._setup_netbox_mock(mock_api)
@@ -1290,12 +1291,12 @@ class TestDeviceHandeling(unittest.TestCase):
         )
         syncer.start()
 
-        # Verify that host.create was called with the cluster name "SW01", not "SW01N0"
+        # Verify the cluster host name is qualified rather than using its member name.
         mock_zabbix.host.create.assert_called_once()
         create_call_kwargs = mock_zabbix.host.create.call_args.kwargs
 
-        # The host should be created with the virtual chassis name, not the device name
-        self.assertEqual(create_call_kwargs["host"], "SW01")
+        self.assertEqual(create_call_kwargs["host"], "SW01.example.com")
+        self.assertEqual(device.name, "SW01N0")
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
@@ -2415,6 +2416,7 @@ class TestVMStatusHandling(unittest.TestCase):
     def test_active_vm_not_in_zabbix_is_created(self, mock_api, mock_zabbix_api):
         """Active VM not yet synced to Zabbix should be created with status enabled (0)."""
         vm = MockNetboxVM(name="test-vm", status_label="Active", zabbix_hostid=None)
+        vm.custom_fields["management_domain"] = "example.com"
         self._setup_netbox_mock(mock_api, vms=[vm])
         mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
 
@@ -2431,7 +2433,7 @@ class TestVMStatusHandling(unittest.TestCase):
 
         mock_zabbix.host.create.assert_called_once()
         create_kwargs = mock_zabbix.host.create.call_args.kwargs
-        self.assertEqual(create_kwargs["host"], "test-vm")
+        self.assertEqual(create_kwargs["host"], "test-vm.example.com")
         self.assertEqual(create_kwargs["status"], 0)
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")

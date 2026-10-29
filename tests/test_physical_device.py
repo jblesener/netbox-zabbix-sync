@@ -268,6 +268,60 @@ class TestPhysicalDevice(unittest.TestCase):
         self.assertIsNone(device.visible_name)
         self.assertFalse(device.use_visible_name)
 
+    def test_normalize_hostname_appends_configured_domain(self):
+        self.mock_nb_device.custom_fields["dns_suffix"] = "example.com"
+        self.device.config["fqdn_domain_cf"] = "dns_suffix"
+
+        self.device.normalize_hostname()
+
+        self.assertEqual(self.device.name, "test-device.example.com")
+        self.assertEqual(self.mock_nb_device.name, "test-device")
+
+    def test_normalize_hostname_preserves_fqdn_and_warns(self):
+        self.mock_nb_device.name = "test-device.example.com"
+        self.device = PhysicalDevice(
+            self.mock_nb_device,
+            self.mock_zabbix,
+            self.mock_nb_journal,
+            "3.0",
+            logger=self.mock_logger,
+            config={"device_cf": "zabbix_hostid"},
+        )
+        self.device.normalize_hostname()
+
+        self.assertEqual(self.device.name, "test-device.example.com")
+        self.mock_logger.warning.assert_called_once_with(
+            "Host %s is already fully qualified; keeping its name unchanged.",
+            "test-device.example.com",
+        )
+
+    def test_normalize_hostname_keeps_name_and_warns_without_domain(self):
+        for field_present, value in ((False, None), (True, "")):
+            with self.subTest(value=value):
+                self.mock_logger.reset_mock()
+                if field_present:
+                    self.mock_nb_device.custom_fields["management_domain"] = value
+                else:
+                    self.mock_nb_device.custom_fields.pop("management_domain", None)
+                self.device = PhysicalDevice(
+                    self.mock_nb_device,
+                    self.mock_zabbix,
+                    self.mock_nb_journal,
+                    "3.0",
+                    logger=self.mock_logger,
+                    config={"device_cf": "zabbix_hostid"},
+                )
+
+                self.device.normalize_hostname()
+
+                self.assertEqual(self.device.name, "test-device")
+                self.mock_logger.warning.assert_called_once_with(
+                    "Host %s: NetBox custom field %s is missing or empty; "
+                    "syncing without FQDN normalization.",
+                    "test-device",
+                    "management_domain",
+                )
+
     def test_get_templates_context(self):
         """Test get_templates_context with valid config."""
         # Set up config_context with valid template data
