@@ -160,10 +160,26 @@ extended_site_properties = False
 #  nb_device_filter = {"site": ["HQ-AMS", "HQ-FRA"]} #Device must be in either one of these sites
 #  nb_device_filter = {"site": "HQ-AMS", "tag": "zabbix", "role__n": ["PDU", "console-server"]} #Device must be in site HQ-AMS, have the tag zabbix and must not be part of the PDU or console-server role
 
+# Shared custom-field regex filters applied to devices, VMs, ONTAP clusters,
+# and Azure subscription Tenants:
+# nb_custom_field_filter = {"environment": "(Dev|Stage)"}
+nb_custom_field_filter = {}
+
 # Default device filter, only get devices which have a name in NetBox:
 nb_device_filter = {"name__n": "null"}
 # Default filter for VMs
 nb_vm_filter = {"name__n": "null"}
+
+# Optional custom-field regex filters. Keys are NetBox custom-field names and
+# values are case-insensitive regex patterns searched within each value.
+# Every configured field must match; missing or empty custom-field values pass.
+# Azure subscription Tenants must still have the tag configured by azure_tag.
+# Example: include devices whose environment contains "Dev" or "Stage":
+# nb_device_custom_field_filter = {"environment": "(Dev|Stage)"}
+nb_device_custom_field_filter = {}
+nb_vm_custom_field_filter = {}
+nb_ontap_cluster_custom_field_filter = {}
+nb_azure_subscription_custom_field_filter = {}
 
 ## Inventory
 # See https://www.zabbix.com/documentation/current/en/manual/config/hosts/inventory#building-inventory

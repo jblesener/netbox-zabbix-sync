@@ -40,6 +40,11 @@ def test_load_config_defaults():
         assert config["tls_psk"] == ""
         assert config["sync_azure_subscriptions"] is False
         assert config["azure_tag"] == "azure"
+        assert config["nb_custom_field_filter"] == {}
+        assert config["nb_device_custom_field_filter"] == {}
+        assert config["nb_vm_custom_field_filter"] == {}
+        assert config["nb_ontap_cluster_custom_field_filter"] == {}
+        assert config["nb_azure_subscription_custom_field_filter"] == {}
         assert config["azure_subscription_id_cf"] == "azure_subscription_id"
         assert config["azure_tenant_id_cf"] == "azure_tenant_id"
         assert config["azure_zabbix_hostid_cf"] == "zabbix_hostid"

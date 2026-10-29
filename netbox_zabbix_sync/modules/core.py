@@ -1,7 +1,9 @@
 """Core component of the sync process"""
 
+import re
 import ssl
 from collections import defaultdict
+from collections.abc import Mapping
 from os import environ
 from pathlib import Path
 from pprint import pformat
@@ -221,12 +223,93 @@ class Sync:
         """Build a stable Zabbix host label for cleanup logs and summaries."""
         return str(host.get("host") or host.get("name") or host.get("hostid"))
 
-    def _collect_filtered_objects(self, endpoint, filters):
+    @staticmethod
+    def _compile_custom_field_filters(custom_field_filters, object_type):
+        """Compile configured custom-field regexes or raise a clear config error."""
+        if isinstance(custom_field_filters, Mapping):
+            filter_maps = (custom_field_filters,)
+        elif isinstance(custom_field_filters, tuple):
+            filter_maps = custom_field_filters
+        else:
+            raise TypeError(
+                f"Custom-field filters for {object_type} must be a mapping or "
+                "a tuple of mappings from field names to regex patterns."
+            )
+
+        compiled_filters = []
+        for filter_map in filter_maps:
+            if not isinstance(filter_map, Mapping):
+                raise TypeError(
+                    f"Custom-field filters for {object_type} must each be a mapping "
+                    "from field names to regex patterns."
+                )
+            for field_name, pattern in filter_map.items():
+                if not isinstance(field_name, str) or not field_name:
+                    raise ValueError(
+                        f"Custom-field filter names for {object_type} must be "
+                        "non-empty strings."
+                    )
+                if not isinstance(pattern, str):
+                    raise TypeError(
+                        f"Regex for {object_type} custom field {field_name!r} "
+                        "must be a string."
+                    )
+                try:
+                    compiled_filters.append(
+                        (field_name, re.compile(pattern, re.IGNORECASE))
+                    )
+                except re.error as error:
+                    raise ValueError(
+                        f"Invalid regex for {object_type} custom field "
+                        f"{field_name!r}: {error}"
+                    ) from error
+        return compiled_filters
+
+    @staticmethod
+    def _custom_field_value_matches(value, pattern):
+        """Match a regex against a custom-field value; empty values pass."""
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value or pattern.search(value) is not None
+        if isinstance(value, Mapping):
+            return not value or pattern.search(str(value)) is not None
+        if isinstance(value, (list, tuple, set)):
+            values = [item for item in value if item is not None and item != ""]
+            return not values or any(pattern.search(str(item)) for item in values)
+        return pattern.search(str(value)) is not None
+
+    @classmethod
+    def _filter_custom_fields(cls, records, compiled_filters):
+        """Apply every configured custom-field regex to a set of records."""
+        if not compiled_filters:
+            return records
+
+        filtered_records = []
+        for record in records:
+            custom_fields = getattr(record, "custom_fields", None)
+            if not isinstance(custom_fields, Mapping):
+                custom_fields = {}
+            if all(
+                cls._custom_field_value_matches(custom_fields.get(field_name), pattern)
+                for field_name, pattern in compiled_filters
+            ):
+                filtered_records.append(record)
+        return filtered_records
+
+    def _collect_filtered_objects(
+        self, endpoint, filters, custom_field_filters=None, object_type="NetBox object"
+    ):
         """Return filtered objects and the complete candidate set for the endpoint."""
+        compiled_custom_field_filters = self._compile_custom_field_filters(
+            custom_field_filters if custom_field_filters is not None else {},
+            object_type,
+        )
         filtered = list(endpoint.filter(**filters))
         candidates = list(endpoint.all()) if filters else list(filtered)
         records_by_id = {self._record_id(record): record for record in candidates}
         records_by_id.update({self._record_id(record): record for record in filtered})
+        filtered = self._filter_custom_fields(filtered, compiled_custom_field_filters)
         return filtered, list(records_by_id.values())
 
     def _add_status_target(
@@ -1278,7 +1361,13 @@ class Sync:
             self.config["nb_device_filter"], device_filter
         )
         netbox_devices, all_netbox_devices = self._collect_filtered_objects(
-            self.netbox.dcim.devices, dev_filter_combined
+            self.netbox.dcim.devices,
+            dev_filter_combined,
+            (
+                self.config["nb_custom_field_filter"],
+                self.config["nb_device_custom_field_filter"],
+            ),
+            "device",
         )
         netbox_vms = []
         all_netbox_vms = []
@@ -1287,7 +1376,13 @@ class Sync:
                 self.config["nb_vm_filter"], vm_filter
             )
             netbox_vms, all_netbox_vms = self._collect_filtered_objects(
-                self.netbox.virtualization.virtual_machines, vm_filter_combined
+                self.netbox.virtualization.virtual_machines,
+                vm_filter_combined,
+                (
+                    self.config["nb_custom_field_filter"],
+                    self.config["nb_vm_custom_field_filter"],
+                ),
+                "VM",
             )
         netbox_ontap_clusters = []
         all_netbox_ontap_clusters = []
@@ -1298,6 +1393,11 @@ class Sync:
             ) = self._collect_filtered_objects(
                 self.netbox.virtualization.clusters,
                 self.config["nb_ontap_cluster_filter"],
+                (
+                    self.config["nb_custom_field_filter"],
+                    self.config["nb_ontap_cluster_custom_field_filter"],
+                ),
+                "ONTAP cluster",
             )
         netbox_azure_subscriptions = []
         all_netbox_azure_subscriptions = []
@@ -1306,7 +1406,13 @@ class Sync:
                 netbox_azure_subscriptions,
                 all_netbox_azure_subscriptions,
             ) = self._collect_filtered_objects(
-                self.netbox.tenancy.tenants, {"tag": self.config["azure_tag"]}
+                self.netbox.tenancy.tenants,
+                {"tag": self.config["azure_tag"]},
+                (
+                    self.config["nb_custom_field_filter"],
+                    self.config["nb_azure_subscription_custom_field_filter"],
+                ),
+                "Azure subscription Tenant",
             )
 
         report_keys_by_label = {}
@@ -1373,7 +1479,7 @@ class Sync:
                 result="pending" if selected else "excluded_by_filter",
                 reason=None
                 if selected
-                else "Does not match the configured Azure tenant tag filter.",
+                else "Does not match configured Azure subscription sync filters.",
             )
             report_keys_by_label[label] = key
 

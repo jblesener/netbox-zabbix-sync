@@ -226,6 +226,30 @@ intervention.
 This is optional, but there may be cases where you want to leave it
 read-write in the UI. For example to manually change or clear the ID and re-run a sync.
 
+## Custom-field filtering
+
+Set `nb_custom_field_filter` in `config.py` to apply the same custom-field
+regex rules to devices, VMs, ONTAP clusters, and Azure subscription Tenants.
+The per-category maps remain available as additional refinements:
+
+```python
+nb_custom_field_filter = {"environment": "(Dev|Stage)"}
+nb_device_custom_field_filter = {"owner": "Network"}
+nb_vm_custom_field_filter = {}
+nb_ontap_cluster_custom_field_filter = {}
+nb_azure_subscription_custom_field_filter = {}
+```
+
+The global example matches values containing either `Dev` or `Stage`. All
+global and category-specific rules must match; if both maps specify the same
+field, both regex patterns must match its value. Matching is case-insensitive
+and searches within each value. For list-valued fields, any member may match.
+Missing, null, and empty values pass their rule. Existing NetBox API filters
+still apply, and Azure subscription Tenants must still have the configured
+`azure_tag`. Objects excluded by these rules are reported as
+`excluded_by_filter`; deleted-source cleanup continues to use the full NetBox
+inventory. Invalid regex patterns raise an explicit configuration error.
+
 ## Virtual Machine (VM) Syncing
 
 In order to use VM syncing, make sure that the `zabbix_id` custom field is also

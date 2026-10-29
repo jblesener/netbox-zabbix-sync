@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import MagicMock, call, patch
 
@@ -5158,6 +5159,94 @@ class TestOntapClusterSync(unittest.TestCase):
         zabbix.host.create.assert_not_called()
 
 
+class TestCustomFieldFilters(unittest.TestCase):
+    """Validate local custom-field regex filtering."""
+
+    def test_regex_search_is_case_insensitive_and_missing_values_pass(self):
+        records = [
+            SimpleNamespace(
+                id=1,
+                custom_fields={"environment": "dEv", "owner": "Operations"},
+            ),
+            SimpleNamespace(
+                id=2,
+                custom_fields={"environment": "Production", "owner": "Operations"},
+            ),
+            SimpleNamespace(id=3, custom_fields={"owner": "Operations"}),
+            SimpleNamespace(id=4, custom_fields={"environment": None}),
+            SimpleNamespace(
+                id=5,
+                custom_fields={"environment": "Stage", "owner": "Finance"},
+            ),
+            SimpleNamespace(
+                id=6,
+                custom_fields={
+                    "environment": ["Production", "Stage-east"],
+                    "owner": "Operations",
+                },
+            ),
+            SimpleNamespace(
+                id=7,
+                custom_fields={"environment": "", "owner": "Operations"},
+            ),
+            SimpleNamespace(id=8, custom_fields={}),
+        ]
+        endpoint = MagicMock()
+        endpoint.filter.return_value = records
+
+        selected, candidates = Sync()._collect_filtered_objects(
+            endpoint,
+            {},
+            {"environment": "(Dev|Stage)", "owner": "operations"},
+            "device",
+        )
+
+        self.assertEqual(
+            {record.id for record in selected},
+            {1, 3, 4, 6, 7, 8},
+        )
+        self.assertEqual({record.id for record in candidates}, set(range(1, 9)))
+        endpoint.filter.assert_called_once_with()
+        endpoint.all.assert_not_called()
+
+    def test_invalid_custom_field_regex_fails_before_netbox_query(self):
+        endpoint = MagicMock()
+
+        with self.assertRaisesRegex(
+            ValueError, "Invalid regex for device custom field 'environment'"
+        ):
+            Sync()._collect_filtered_objects(
+                endpoint,
+                {},
+                {"environment": "("},
+                "device",
+            )
+
+        endpoint.filter.assert_not_called()
+
+    def test_global_and_category_patterns_are_anded_for_the_same_field(self):
+        records = [
+            SimpleNamespace(id=1, custom_fields={"environment": "dEv"}),
+            SimpleNamespace(id=2, custom_fields={"environment": "Stage"}),
+            SimpleNamespace(id=3, custom_fields={}),
+            SimpleNamespace(id=4, custom_fields={"environment": "Production"}),
+        ]
+        endpoint = MagicMock()
+        endpoint.filter.return_value = records
+
+        selected, _ = Sync()._collect_filtered_objects(
+            endpoint,
+            {},
+            (
+                {"environment": "(Dev|Stage)"},
+                {"environment": "Dev"},
+            ),
+            "device",
+        )
+
+        self.assertEqual({record.id for record in selected}, {1, 3})
+
+
 class TestUnsyncedObjectSummary(unittest.TestCase):
     """Exercise end-of-run reporting for skipped devices and VMs."""
 
@@ -5187,6 +5276,51 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
         syncer.zabbix = zabbix
         syncer.nb_version = "3.5"
         return syncer
+
+    def test_custom_field_filters_apply_to_every_sync_category(self):
+        device = MockNetboxDevice(name="filtered-device")
+        device.custom_fields["environment"] = "Production"
+        vm = MockNetboxVM(
+            name="filtered-vm",
+            custom_fields={"zabbix_hostid": None, "environment": "Production"},
+        )
+        cluster = MockNetboxCluster(name="filtered-cluster")
+        cluster.custom_fields["environment"] = "Production"
+        tenant = MockNetboxTenant(name="filtered-tenant")
+        tenant.custom_fields["environment"] = "Production"
+        custom_field_filter = {"environment": "(Dev|Stage)"}
+        syncer = self._syncer(
+            devices=[device],
+            vms=[vm],
+            config={
+                "sync_vms": True,
+                "sync_ontap_clusters": True,
+                "sync_azure_subscriptions": True,
+                "nb_custom_field_filter": custom_field_filter,
+            },
+        )
+        syncer.netbox.dcim.devices.all.return_value = [device]
+        syncer.netbox.virtualization.virtual_machines.all.return_value = [vm]
+        syncer.netbox.virtualization.clusters.filter.return_value = [cluster]
+        syncer.netbox.virtualization.clusters.all.return_value = [cluster]
+        syncer.netbox.tenancy.tenants.filter.return_value = [tenant]
+        syncer.netbox.tenancy.tenants.all.return_value = [tenant]
+
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ),
+        ):
+            self.assertTrue(syncer.start())
+
+        targets = syncer.last_status_report.document()["targets"]
+        self.assertEqual(len(targets), 4)
+        self.assertTrue(
+            all(target["sync_result"] == "excluded_by_filter" for target in targets)
+        )
+        syncer.netbox.tenancy.tenants.filter.assert_called_once_with(tag="azure")
 
     def test_reports_missing_primary_ip_for_device(self):
         device = MockNetboxDevice(name="no-primary-ip")
