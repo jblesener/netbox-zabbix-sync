@@ -39,7 +39,11 @@ def test_load_config_defaults():
         assert config["tls_subject"] == ""
         assert config["tls_psk_identity"] == ""
         assert config["tls_psk"] == ""
+        assert config["create_journal"] is False
+        assert config["sync_vms"] is False
+        assert config["sync_ontap_clusters"] is False
         assert config["sync_azure_subscriptions"] is False
+        assert config["adopt_existing_hosts"] is False
         assert config["azure_tag"] == "azure"
         assert config["nb_custom_field_filter"] == {}
         assert config["nb_device_custom_field_filter"] == {}

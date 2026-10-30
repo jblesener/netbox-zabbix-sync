@@ -69,13 +69,14 @@ fork's older core/device structure wholesale.
    - [x] Integrate Jinja2 config-context rendering without breaking split OOB
      imports or fork-specific context values.
 
-4. **Port fork-only features**
-   - Integrate status reports, transition-based journals, custom-field
+4. **Port fork-only features — complete**
+   - [x] Integrate status reports, transition-based journals, custom-field
      filtering, and ownership-safe deleted-source cleanup into the upstream
      sync lifecycle.
-   - Port Azure subscription and ONTAP cluster sync, plus VMware/ESXi
+   - [x] Port Azure subscription and ONTAP cluster sync, plus VMware/ESXi
      adoption, FQDN normalization, and any associated adapters.
-   - Keep each feature's configuration opt-in and preserve current defaults.
+   - [x] Keep each feature's configuration opt-in and preserve current
+     defaults.
 
 5. **Update dependencies, documentation, and CI**
    - Reconcile `pyproject.toml`, `requirements.txt`, and `uv.lock` with
@@ -144,6 +145,21 @@ fork's older core/device structure wholesale.
   16 subtests passed; Ruff, formatting, `ty check`, `uv lock --check`, and
   `uv build` passed. The deselected container-backed tests require the live
   stack planned for Phase 6 and were not run here.
+
+## Phase 4 execution record
+
+- The Phase 2 merge retained the fork's sync orchestration and feature
+  adapters. Verified that status reports and transition-only journals,
+  custom-field filters, ownership-safe cleanup, Azure and ONTAP sync, VMware/
+  ESXi adoption, and FQDN normalization remain connected to that lifecycle.
+- Confirmed opt-in defaults remain unchanged (`create_journal`, VM/ONTAP/
+  Azure sync, adoption, FQDN adoption matching, and deleted-host cleanup all
+  remain disabled; custom-field filter maps remain empty). Added explicit
+  regression assertions for the previously unasserted defaults.
+- Verification: focused status/cleanup/filter/config tests — 76 passed;
+  core/device/VM integration tests — 161 passed, 10 subtests; full default
+  suite — 498 passed, 162 deselected, 1 xfailed, 16 subtests. Ruff/format and
+  `ty check` passed. The deselected container-backed tests remain for Phase 6.
 
 ## Completion criteria
 
