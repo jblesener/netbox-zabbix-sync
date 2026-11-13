@@ -79,6 +79,21 @@ class ZabbixUsermacros:
 
         return merged
 
+    @staticmethod
+    def zabbix_only_macros(zabbix_macros, netbox_macros, macros_to_clear=()):
+        """Return names of manual Zabbix macros not managed by NetBox."""
+        netbox_names = {macro["macro"] for macro in netbox_macros}
+        clear_names = set(macros_to_clear)
+        return sorted(
+            {
+                macro["macro"]
+                for macro in zabbix_macros
+                if str(macro.get("automatic", "0")) != "1"
+                and macro["macro"] not in netbox_names
+                and macro["macro"] not in clear_names
+            }
+        )
+
     def validate_macro(self, macro_name):
         """
         Validates usermacro name

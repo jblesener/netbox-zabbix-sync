@@ -93,17 +93,48 @@ class TestUsermacroSync(unittest.TestCase):
         mock_usermacros_class.return_value = mock_macros_instance
 
         device = self.create_mock_device(
-            config={
-                "usermacro_sync": "partial",
-                "device_cf": "zabbix_hostid",
-                "tag_sync": False,
-            }
+            usermacro_sync="partial",
+            device_cf="zabbix_hostid",
+            tag_sync=False,
         )
 
         device.set_usermacros()
 
         self.assertIsInstance(device.usermacros, list)
         self.assertGreater(len(device.usermacros), 0)
+
+    def test_partial_sync_reports_only_preserved_manual_macro_names(self):
+        device = self.create_mock_device(
+            usermacro_sync="partial",
+            device_cf="zabbix_hostid",
+            tag_sync=False,
+        )
+        device.logger = MagicMock()
+        device.usermacros = [{"macro": "{$MANAGED}", "value": "netbox", "type": "0"}]
+        device.usermacros_to_clear = {"{$CLEAR}"}
+        host = {
+            "macros": [
+                {"macro": "{$KEEP}", "value": "manual", "type": "0"},
+                {"macro": "{$CLEAR}", "value": "remove", "type": "0"},
+                {"macro": "{$MANAGED}", "value": "old", "type": "0"},
+                {
+                    "macro": "{$AUTOMATIC}",
+                    "value": "discovered",
+                    "type": "0",
+                    "automatic": "1",
+                },
+            ]
+        }
+
+        with patch.object(device, "_update_zabbix_host_by_id"):
+            device._sync_discovered_macros(host)
+
+        self.assertEqual(device.zabbix_only_usermacros, ["{$KEEP}"])
+        device.logger.info.assert_any_call(
+            "Host %s: Zabbix-only usermacros preserved in partial mode: %s",
+            device.name,
+            "{$KEEP}",
+        )
 
 
 class TestZabbixUsermacros(unittest.TestCase):

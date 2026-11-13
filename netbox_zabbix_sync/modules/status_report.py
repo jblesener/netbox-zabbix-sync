@@ -102,6 +102,7 @@ class SyncStatusReport:
             "zabbix_hostid": self._hostid(zabbix_hostid),
             "zabbix_enabled": None,
             "zabbix_interfaces": None,
+            "zabbix_only_usermacros": None,
             "sync_result": sync_result,
             "reason": reason,
             "status_error": None,
@@ -155,6 +156,9 @@ class SyncStatusReport:
                 interfaces = getattr(model, "zabbix_interfaces", None)
                 if interfaces is not None:
                     target["zabbix_interfaces"] = self._interface_list(interfaces)
+                usermacros = getattr(model, "zabbix_only_usermacros", None)
+                if usermacros is not None:
+                    target["zabbix_only_usermacros"] = list(usermacros)
 
             source = self._source_records.get(key)
             if source is not None and model is None:

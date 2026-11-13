@@ -5271,7 +5271,15 @@ class TestAdoptExistingHosts(unittest.TestCase):
             "pass",
             None,
         )
-        syncer.start()
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ):
+                syncer.start()
+            report = json.loads(
+                (Path(temp_dir) / "sync-status.json").read_text(encoding="utf-8")
+            )
 
         macro_update = next(
             update
@@ -5282,6 +5290,8 @@ class TestAdoptExistingHosts(unittest.TestCase):
             [macro["macro"] for macro in macro_update.kwargs["macros"]],
             ["{$ZABBIX_ONLY}"],
         )
+        target = next(item for item in report["targets"] if item["name"] == device.name)
+        self.assertEqual(target["zabbix_only_usermacros"], ["{$ZABBIX_ONLY}"])
 
 
 class TestOntapClusterSync(unittest.TestCase):
@@ -5810,7 +5820,7 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
 
     def test_json_report_includes_final_status_for_synced_device(self):
         device = MockNetboxDevice(device_id=11, name="synced-router")
-        syncer = self._syncer(devices=[device])
+        syncer = self._syncer(devices=[device], config={"usermacro_sync": "partial"})
         syncer.zabbix.version = 7.0
         syncer.zabbix.host.create.return_value = {"hostids": ["42"]}
         syncer.zabbix.hostinterface.get.return_value = [
@@ -5841,3 +5851,4 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
             target["zabbix_interfaces"],
             [{"interfaceid": "91", "type": 2, "availability": 2}],
         )
+        self.assertEqual(target["zabbix_only_usermacros"], [])

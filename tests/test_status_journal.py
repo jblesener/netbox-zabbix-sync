@@ -224,3 +224,25 @@ def test_sync_writes_journals_alongside_the_json_status_report():
 
     journal_endpoint.create.assert_called_once()
     write_report.assert_called_once()
+
+
+def test_status_report_includes_zabbix_only_usermacro_names_from_models():
+    report, key = _report()
+    report.attach_model(
+        key,
+        SimpleNamespace(
+            zabbix_id="456",
+            zabbix_only_usermacros=["{$ZABBIX_ONLY}"],
+        ),
+    )
+
+    report.refresh_from_models()
+
+    target = report.document()["targets"][0]
+    assert target["zabbix_only_usermacros"] == ["{$ZABBIX_ONLY}"]
+
+
+def test_status_report_marks_usermacros_not_applicable_as_null():
+    report, _ = _report()
+
+    assert report.document()["targets"][0]["zabbix_only_usermacros"] is None

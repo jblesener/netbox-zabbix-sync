@@ -107,6 +107,7 @@ class Host(ABC):
         self.ipmi = {}
         self.usermacros = []
         self.usermacros_to_clear: set[str] = set()
+        self.zabbix_only_usermacros: list[str] | None = None
         self.tags = []
         self.logger = logger if logger else getLogger(__name__)
         self._set_basics()

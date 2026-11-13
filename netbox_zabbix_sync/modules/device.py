@@ -1269,6 +1269,7 @@ class PhysicalDevice(Host):
                 for macro in host["macros"]
                 if str(macro.get("automatic", "0")) != "1"
             ]
+            self._record_zabbix_only_usermacros(manual, netbox_macros)
             netbox_macros = ZabbixUsermacros.merge_partial(
                 manual, netbox_macros, self.usermacros_to_clear
             )
@@ -1302,6 +1303,18 @@ class PhysicalDevice(Host):
             for macro in desired_macros
         ]
         self._update_zabbix_host_by_id(hostid or self.zabbix_id, macros=update_macros)
+
+    def _record_zabbix_only_usermacros(self, zabbix_macros, netbox_macros):
+        """Record and log manually configured macros retained by partial sync."""
+        self.zabbix_only_usermacros = ZabbixUsermacros.zabbix_only_macros(
+            zabbix_macros, netbox_macros, self.usermacros_to_clear
+        )
+        if self.zabbix_only_usermacros:
+            self.logger.info(
+                "Host %s: Zabbix-only usermacros preserved in partial mode: %s",
+                self.name,
+                ", ".join(self.zabbix_only_usermacros),
+            )
 
     def _sync_discovered_tags(self, host, hostid=None):
         """Sync manual tags without deleting tags created by LLD."""
@@ -2038,6 +2051,8 @@ class PhysicalDevice(Host):
                 host = self.zabbix.host.create(**create_data)
                 self.zabbix_id = host["hostids"][0]
                 self.zabbix_status = str(self.zabbix_state)
+                if str(self.config["usermacro_sync"]).lower() == "partial":
+                    self.zabbix_only_usermacros = []
             except APIRequestError as e:
                 msg = f"Host {self.name}: Couldn't create. Zabbix returned {e}."
                 self.logger.error(msg)
@@ -2426,6 +2441,7 @@ class PhysicalDevice(Host):
                     macro.pop("value")
 
             if partial_sync_bit:
+                self._record_zabbix_only_usermacros(host["macros"], netbox_macros)
                 compare_macros = ZabbixUsermacros.merge_partial(
                     host["macros"], netbox_macros, self.usermacros_to_clear
                 )

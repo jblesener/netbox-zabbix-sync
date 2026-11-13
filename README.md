@@ -123,6 +123,7 @@ has this shape:
   "zabbix_interfaces": [
     {"interfaceid": "789", "type": 2, "availability": 1}
   ],
+  "zabbix_only_usermacros": null,
   "sync_result": "synced",
   "reason": null,
   "status_error": null
@@ -133,6 +134,11 @@ has this shape:
 `availability` uses Zabbix's numeric values: `0` unknown, `1` available, and
 `2` unavailable. `sync_result` is `synced`, `skipped`, `failed`, `removed`, or
 `excluded_by_filter`; unavailable or inapplicable status values are `null`.
+`zabbix_only_usermacros` is `null` when partial usermacro sync does not apply;
+otherwise it is a sorted list of manually configured Zabbix macro names not
+defined in NetBox, or an empty list when there are none. Automatically
+discovered macros and macros explicitly cleared by NetBox are excluded. Macro
+values are never included, and non-empty lists are also written to the log.
 
 Targets include all objects in enabled sync categories, including those
 excluded by configured filters, plus sync skips, failures, and removals.
@@ -993,7 +999,9 @@ In partial mode, NetBox usermacros from both config context and field maps
 overwrite existing Zabbix usermacros with the same name. Usermacros that exist
 only in Zabbix are left unchanged unless a config-context `type: "clear"`
 directive explicitly names one to remove. Automatically discovered macros
-remain protected.
+remain protected. Names of preserved, manually configured Zabbix-only macros
+are logged and included in each target's `zabbix_only_usermacros` field in
+`sync-status.json`; macro values are not reported.
 
 There are two NetBox sources that can be used to populate usermacros:
 
