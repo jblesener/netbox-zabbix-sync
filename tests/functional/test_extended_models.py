@@ -27,10 +27,9 @@ is `dict(self)[key]` and does no such thing.
    NetBox did not nest is never lazily fetched. It maps to "" like an empty
    value rather than to its real value -- see
    `test_unextended_mapped_field_maps_to_empty_string`.
-2. `extended_site_properties` is redundant for devices: `Hostgroup` reads
-   `self.nb.site.region` (hostgroups.py:64) for every device with a site,
-   which lazily fetches the site anyway -- see
-   `test_site_is_fetched_even_without_extended_site_properties`.
+2. Hostgroup generation also lazily fetches site details, but it runs after
+   field mapping. Core therefore preloads site details before mapping whenever
+   a configured map references a site property absent from the nested record.
 """
 
 from urllib.parse import urlparse
@@ -92,18 +91,15 @@ def test_unextended_mapped_field_maps_to_empty_string(
 def test_site_is_fetched_even_without_extended_site_properties(
     device_factory, seeded, sync_runner, netbox_requests, zabbix_host
 ):
-    """The flag is redundant for devices: the site is fetched either way.
+    """A map can use extended site properties without the global flag.
 
-    `Hostgroup` reads `self.nb.site.region` for every device that has a site
-    (hostgroups.py:63-71), and that attribute is not nested, so pynetbox
-    fetches the full site to answer it. By the time the inventory map runs, the
-    geo data is already on the record.
+    The nested site omits latitude, so core must load full site details before
+    the inventory mapper walks `site/latitude`. Hostgroup generation also
+    needs site details later; loading them here reuses that request rather
+    than adding another one.
 
-    So the config file's warning that this setting "will increase the number of
-    API queries" does not hold for devices, and neither does needing it to map
-    `site/latitude`. Pinned rather than left implicit because the day pynetbox
-    stops lazy-loading, every user mapping site geo without the flag silently
-    gets empty values instead -- and this test is where that shows up.
+    This is pinned so a future change in pynetbox's lazy loading cannot make
+    mappings silently receive empty values.
     """
     device = device_factory(address="10.0.0.100/24")
 
@@ -114,10 +110,7 @@ def test_site_is_fetched_even_without_extended_site_properties(
         device_inventory_map={"site/latitude": "location_lat", "name": "name"},
     )
 
-    assert site_detail_requests(netbox_requests, seeded["site"].id), (
-        "the site was not fetched; the lazy load this test documents is gone "
-        "and mapping site/latitude without the flag now maps to an empty value"
-    )
+    assert site_detail_requests(netbox_requests, seeded["site"].id)
     host = zabbix_host(device.name)
     assert host is not None
     assert host["inventory"]["location_lat"] == SITE_LATITUDE
@@ -128,8 +121,9 @@ def test_site_geo_synced_with_extended_site_properties(
 ):
     """With the flag on, the site's geo data reaches Zabbix inventory.
 
-    This is the documented reason the setting exists: the default inventory map
-    ships `latitude`/`longitude` commented out in favour of `site/latitude`.
+    The flag also makes the data available to other consumers such as config
+    context rendering; a map that names an omitted site property preloads it
+    automatically.
     """
     device = device_factory(address="10.0.0.101/24")
 
@@ -157,16 +151,13 @@ def test_site_costs_one_fetch_per_host_either_way(
 ):
     """The site is fetched once per host whether the flag is set or not.
 
-    The measured cost of `extended_site_properties` on devices, and it is
-    nothing: two devices, two site fetches, with the flag off and with it on.
-    Each device deserialises its own site Record, so `has_details` is not
-    shared and there is no run-level caching to lose -- the flag simply moves
-    who triggers the fetch, from `Hostgroup` to `core.start`.
+    The site map preloads details before inventory mapping. The later
+    hostgroup lookup reuses each device's site Record, so the extension flag
+    does not duplicate that request.
 
     Which means the config file's warning that this setting "will increase the
-    number of API queries" does not describe devices. It is also the N+1 this
-    would need if the fetch ever became conditional: one site, one request per
-    host.
+    number of API queries" does not describe these mapped devices: there is
+    one site request per host with the flag both off and on.
     """
     first = device_factory(address="10.0.0.102/24")
     second = device_factory(address="10.0.0.103/24")

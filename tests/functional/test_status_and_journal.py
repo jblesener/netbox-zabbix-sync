@@ -258,20 +258,26 @@ def test_journal_entry_written_on_creation(nb, device_factory, run_sync):
         )
     )
     assert entries, "create_journal was on but NetBox has no entry for the device"
-    assert any("Zabbix" in entry.comments for entry in entries)
+    assert any("Created host in Zabbix" in entry.comments for entry in entries)
 
 
-def test_no_journal_entries_when_disabled(nb, device_factory, run_sync):
-    """The off state, and the default -- so the test above proves the setting."""
+def test_status_journal_remains_when_action_journaling_is_disabled(
+    nb, device_factory, run_sync
+):
+    """The default disables detailed action entries, not transition journals."""
     device = device_factory()
 
     run_sync(device.name)
 
-    assert not list(
+    entries = list(
         nb.extras.journal_entries.filter(
             assigned_object_type="dcim.device", assigned_object_id=device.id
         )
     )
+    assert any(
+        entry.comments.startswith("[NetBox-Zabbix-Sync status v1:") for entry in entries
+    )
+    assert not any("Created host in Zabbix" in entry.comments for entry in entries)
 
 
 def test_journal_entry_written_on_removal(nb, device_factory, run_sync, zabbix_host):

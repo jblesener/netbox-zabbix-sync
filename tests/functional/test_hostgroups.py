@@ -7,8 +7,9 @@ vouch for are the ones that read NetBox's own tree shapes:
 
 - **Nested regions and site groups** are walked with `build_path` (tools.py:24),
   which reconstructs the ancestry from a flat recordset using each record's
-  `_depth` and `parent` -- fields only a real NetBox populates, and it matches
-  ancestors by their *name*.
+  `_depth` and parent record IDs. NetBox allows the same region name under
+  different parents, so ancestry must follow the related record rather than a
+  name lookup.
 - **A format segment that is not a built-in option** is looked up as a custom
   field on the host (hostgroups.py:157), or used as a literal if quoted. Whether
   a given custom field is even visible on the object is a NetBox question.
@@ -189,26 +190,13 @@ def test_empty_segment_is_skipped(device_factory, run_sync, zabbix_host):
     assert hostgroup_of(zabbix_host(device.name)) == (f"{seed_netbox.SITE_NAME}/{ROLE}")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "build_path matches ancestors by name (tools.py:37), but NetBox only "
-        "enforces unique region names at the top level -- a name repeated under "
-        "two different parents is allowed. build_path then finds two matches, "
-        "cannot choose, and returns [] (tools.py:32,35), so the entire region "
-        "path is silently dropped and the device lands in the wrong hostgroup "
-        "with no error. Remove this marker once build_path disambiguates by "
-        "parent/id rather than name."
-    ),
-)
 def test_ambiguous_region_name_still_traverses(
     topology, device_factory, run_sync, zabbix_host
 ):
     """A region name reused under two parents must not lose the path.
 
-    The device's region is unambiguous *in context* -- it has one parent -- but
-    build_path only has the name to go on. The correct hostgroup is the full
-    ancestry; today the sync produces just the role.
+    The region's parent ID is unambiguous even though its name is reused under
+    another parent. The correct hostgroup includes the full ancestry.
     """
     eu = topology.region(name=f"EU-{uuid4().hex[:6]}")
     us = topology.region(name=f"US-{uuid4().hex[:6]}")

@@ -78,20 +78,22 @@ fork's older core/device structure wholesale.
    - [x] Keep each feature's configuration opt-in and preserve current
      defaults.
 
-5. **Update dependencies, documentation, and CI**
-   - Reconcile `pyproject.toml`, `requirements.txt`, and `uv.lock` with
+5. **Update dependencies, documentation, and CI — complete**
+   - [x] Reconcile `pyproject.toml`, `requirements.txt`, and `uv.lock` with
      upstream's Jinja2/JSONPath dependencies and newer `pynetbox` baseline,
      while retaining dependencies required by fork features.
-   - Align standard documentation with upstream while retaining complete
+   - [x] Align standard documentation with upstream while retaining complete
      documentation for fork-only options and OOB semantics.
-   - Merge upstream functional-test CI with the fork's image-publishing
-     workflow.
+   - [x] Retain upstream functional-test CI alongside the fork's image- and
+     package-publishing workflows.
 
-6. **Verify behavior**
-   - Retain and adapt fork tests for every fork-specific feature.
-   - Add coverage for OOB modes, multiple interfaces, config-key precedence,
+6. **Verify behavior — complete**
+   - [x] Retain and adapt fork tests for every fork-specific feature.
+   - [x] Resolve nested hostgroup ancestry by NetBox record ID when names
+     repeat, and remove the corresponding expected-failure markers.
+   - [x] Add coverage for OOB modes, multiple interfaces, config-key precedence,
      filtering/cleanup, and status reporting/journaling.
-   - Run unit tests, Ruff, type checks, package build, and upstream's
+   - [x] Run unit tests, Ruff, type checks, package build, and upstream's
      container-backed functional suite, including supported NetBox versions.
 
 ## Phase 1 execution record (2026-10-29)
@@ -160,6 +162,42 @@ fork's older core/device structure wholesale.
   core/device/VM integration tests — 161 passed, 10 subtests; full default
   suite — 498 passed, 162 deselected, 1 xfailed, 16 subtests. Ruff/format and
   `ty check` passed. The deselected container-backed tests remain for Phase 6.
+
+## Phase 5 execution record
+
+- Regenerated `requirements.txt` from the lockfile without a local editable
+  project entry. Its `pynetbox` pin is now 7.9.0, matching `pyproject.toml`
+  and `uv.lock`, with the upstream Jinja2 and JSONPath dependencies retained.
+- Reorganized the README around upstream's overview, features, requirements,
+  quick start, installation, configuration, documentation, development, and
+  license sections. Kept the full fork-specific configuration reference,
+  status-report guidance, and both OOB modes; updated clone and image examples
+  to point to this fork.
+- Confirmed upstream functional-test CI coexists with the fork's image and
+  package publishing workflows; no workflow changes were needed.
+- Verification: `uv lock --check` and an exact `uv export` comparison passed;
+  default test suite — 498 passed, 162 deselected, 1 xfailed, 16 subtests;
+  `uv build` and `git diff --check` passed. Container-backed functional tests
+  remain for Phase 6.
+
+## Phase 6 execution record
+
+- Fixed nested hostgroup paths for repeated region names by passing the NetBox
+  record through and resolving each ancestor by ID. Name-based lookup remains
+  as a fallback for older/string-only records. Removed the unit and functional
+  expected-failure markers and added ID-based regression coverage.
+- Corrected custom-field queries to use NetBox's `object_type` filter and
+  normalized select-field template values across NetBox 4.6 and 4.7. Site maps
+  now load omitted site properties before mapping; global preloading remains
+  available through `extended_site_properties`.
+- Updated functional assertions to distinguish filtered object requests from
+  the unfiltered status-report scan, and detailed action journals from
+  transition-based status journals. Clarified the corresponding configuration
+  and README guidance.
+- Verification: default suite — 500 passed, 162 deselected, 16 subtests;
+  functional suite on NetBox 4.6.10 and 4.7.0 with Zabbix 7.0 — 160 passed
+  and 2 xfailed on each version. Ruff, formatting, `ty check`,
+  `uv lock --check`, package build, and `git diff --check` passed.
 
 ## Completion criteria
 

@@ -1,4 +1,5 @@
 from logging import getLogger
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -134,7 +135,8 @@ class TestFieldMapper:
         their fields, so "the map names a field this object does not have" is
         an ordinary condition, not a programming error. field_mapper reads
         through dict(record), which does not lazy load: without
-        extended_site_properties the site's latitude is simply not there.
+        site details having been loaded first, the site's latitude is simply
+        not there.
         """
         nb = netbox.device(site=netbox.site("AMS-01", latitude=52.37))
 
@@ -304,14 +306,15 @@ class TestJinjafyConfigContext:
             jinjafy_config_context(nb)
 
 
-def region(name: str, depth: int, parent: str | None):
+def region(
+    name: str, depth: int, parent: str | int | None, record_id: int | None = None
+):
     """One entry of the flat recordset build_path walks.
 
-    Mirrors what convert_recordset produces from a pynetbox region: a dict with
-    the record's own `name`, its `_depth` in the tree, and `parent` -- which is
-    a Record whose str() is the parent's name, so a plain string stands in.
+    Mirrors what convert_recordset produces from a pynetbox region. Parent can
+    be a related record ID or, for older fixtures, its name.
     """
-    return {"name": name, "_depth": depth, "parent": parent}
+    return {"id": record_id, "name": name, "_depth": depth, "parent": parent}
 
 
 class TestBuildPath:
@@ -341,29 +344,17 @@ class TestBuildPath:
     def test_unknown_endpoint_returns_empty(self):
         assert build_path("nope", [region("EU", 0, None)]) == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "build_path finds ancestors by name (tools.py:37). NetBox only "
-            "enforces unique region names at the top level, so a name reused "
-            "under two parents yields two matches; build_path cannot choose and "
-            "returns [] (tools.py:32,35), dropping the whole path. The device "
-            "then lands in the wrong hostgroup with no error -- see the "
-            "functional test test_ambiguous_region_name_still_traverses. Remove "
-            "this marker once build_path disambiguates by parent or id."
-        ),
-    )
     def test_reused_ancestor_name_still_resolves(self):
         """`North` under both EU and US should still resolve EU's leaf's path.
 
-        The leaf is unambiguous -- it has one parent -- but its parent's name is
-        not unique across the tree, which is all build_path keys on.
+        The parent IDs identify the correct branch even though its name is
+        shared by another region.
         """
         records = [
-            region("EU", 0, None),
-            region("US", 0, None),
-            region("North", 1, "EU"),
-            region("North", 1, "US"),
-            region("Leaf", 2, "North"),
+            region("EU", 0, None, 1),
+            region("US", 0, None, 2),
+            region("North", 1, 1, 3),
+            region("North", 1, 2, 4),
+            region("Leaf", 2, 3, 5),
         ]
-        assert build_path("Leaf", records) == ["EU", "North", "Leaf"]
+        assert build_path(SimpleNamespace(id=5), records) == ["EU", "North", "Leaf"]

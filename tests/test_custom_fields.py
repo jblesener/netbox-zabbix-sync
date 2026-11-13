@@ -116,6 +116,7 @@ class TestTemplateCustomField:
         device = physical_device(nb, template_cf="zabbix_template")
 
         assert device._get_templates_cf() == [EXPECTED[cf_type]]
+        assert device.get_templates_cf() == [EXPECTED[cf_type]]
 
 
 class TestWriteBack:

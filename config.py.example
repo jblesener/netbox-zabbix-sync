@@ -191,8 +191,10 @@ traverse_site_groups = False
 
 ## Extended site properties
 # By default, NetBox will only return basic site info for any device or VM.
-# By setting `extended_site_properties` to True, the script will query NetBox for additional site info.
-# Be aware that this will increase the number of API queries to NetBox.
+# Set this to True to preload additional site info for all processed devices/VMs.
+# Maps that reference a site property omitted from NetBox's nested site data
+# load the full site record automatically before applying the map.
+# This can add API queries when no other sync operation needs the full record.
 extended_site_properties = False
 
 ## Filtering
@@ -254,8 +256,8 @@ device_inventory_map = { "asset_tag": "asset_tag",
                          "device_type/model": "type",
                          "device_type/manufacturer/name": "vendor",
                          "oob_ip/address": "oob_ip" }
-# Replace latitude and longitude with site/latitude and and site/longitude to use
-# site geo data. Enable extended_site_properties for this to work!
+# Replace latitude and longitude with site/latitude and site/longitude to use
+# site geo data. The full site record is loaded automatically for this map.
 
 # We also support inventory mapping on Virtual Machines.
 vm_inventory_map = { "status/label": "deployment_status",

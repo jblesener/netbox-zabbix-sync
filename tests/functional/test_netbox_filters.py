@@ -176,9 +176,14 @@ def test_device_filter_is_applied_server_side(
     sync_runner(device_filter={"name": target.name})
 
     fetches = requests_to(netbox_requests, DEVICES_ENDPOINT)
-    assert fetches, "no device request was made"
+    filtered_fetches = [
+        exchange for exchange in fetches if exchange.params.get("name") == [target.name]
+    ]
+    assert filtered_fetches, "no filtered device request was made"
 
-    returned = {device["name"] for ex in fetches for device in ex.results}
+    returned = {
+        device["name"] for exchange in filtered_fetches for device in exchange.results
+    }
     assert returned == {target.name}, (
         f"device fetch was not filtered server-side; {other.name} came back too"
     )

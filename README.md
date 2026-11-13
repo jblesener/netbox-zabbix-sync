@@ -1,34 +1,108 @@
 # NetBox to Zabbix synchronization
 
-A script to create, update and delete Zabbix hosts using NetBox device objects. Tested and compatible with all [currently supported Zabbix releases](https://www.zabbix.com/life_cycle_and_release_policy).
+A script to create, update, and delete Zabbix hosts using NetBox devices and
+virtual machines, with optional Azure subscription and ONTAP cluster syncing.
+This fork follows the upstream host and interface model while retaining its
+additional integrations and configuration options. It is tested with currently
+supported Zabbix releases.
 
-# Documentation
+## Features
 
-Documentation will be moved to the Github wiki of this project. Feel free to [check it out](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki)!
+- Syncs NetBox devices and, optionally, virtual machines, Azure subscription
+  Tenants, and ONTAP clusters to Zabbix hosts.
+- Creates, updates, disables, or removes hosts based on NetBox state, with
+  opt-in ownership-safe cleanup for deleted or filtered sources.
+- Builds hostgroups from NetBox data and links templates from device types or
+  config context.
+- Configures agent, SNMP, IPMI, and JMX interfaces, proxies, proxy groups,
+  inventory, tags, and usermacros.
+- Can treat a NetBox virtual chassis as a single Zabbix host through clustering.
+- Supports upstream same-host OOB interfaces and this fork's split-host OOB
+  imports; both modes can be enabled independently.
+- Supports VMware/ESXi host adoption, FQDN normalization, and custom-field
+  filtering.
+- Writes a sync-status JSON report and transition-based NetBox status journals;
+  optional detailed action journals are controlled by `create_journal`.
 
-## Installation via Docker
+## Requirements
 
-To pull the latest stable version to your local cache, use the following docker
-pull command:
+- A NetBox instance and an API token with the required read/write permissions.
+  Journal-entry permissions are needed for status reporting; `create_journal`
+  also uses them for detailed action entries.
+- A Zabbix server and an API token or user credentials.
+- Python 3.12 or later, unless you use the Docker image.
+- A `zabbix_hostid` custom field in NetBox; split-host OOB imports also need
+  the configured OOB host-ID field. See the [configuration reference](#fork-specific-configuration-reference).
+
+## Quick start
+
+After preparing NetBox, run a one-time sync with Docker:
 
 ```bash
-docker pull ghcr.io/thenetworkguy/netbox-zabbix-sync:main
+docker run --rm \
+  -e NETBOX_HOST=https://netbox.example.com \
+  -e NETBOX_TOKEN=your_netbox_token \
+  -e ZABBIX_HOST=https://zabbix.example.com \
+  -e ZABBIX_TOKEN=your_zabbix_token \
+  ghcr.io/jblesener/netbox-zabbix-sync:latest
 ```
 
-Make sure to specify the needed environment variables for the script to work
-(see [here](#set-environment-variables)) on the command line or use an
-[env file](https://docs.docker.com/reference/cli/docker/container/run/#env).
+Each run performs one sync and exits, so schedule it to keep Zabbix up to date.
+See the [Quick Start](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Quick-Start)
+for the upstream step-by-step guide.
+
+## Installation
+
+- **Docker:** `ghcr.io/jblesener/netbox-zabbix-sync`
+- **Python package:** `pip install netbox-zabbix-sync`, which provides the
+  `netbox-zabbix-sync` command.
+- **From source:** install dependencies with `uv sync` or
+  `pip install -r requirements.txt`, then run `python3 netbox_zabbix_sync.py`.
 
 ```bash
-docker run -d -t -i -e ZABBIX_HOST='https://zabbix.local' \ 
--e ZABBIX_TOKEN='othersecrettoken' \
--e NETBOX_HOST='https://netbox.local' \
--e NETBOX_TOKEN='secrettoken' \
---name netbox-zabbix-sync ghcr.io/thenetworkguy/netbox-zabbix-sync:main
+git clone https://github.com/jblesener/netbox-zabbix-sync.git
+cd netbox-zabbix-sync
+uv sync
 ```
 
-This should run a one-time sync. You can check the sync with
-`docker logs netbox-zabbix-sync`.
+## Configuration
+
+The built-in defaults work for a basic sync. To change them, copy
+`config.py.example` to `config.py`, use `NBZX_` environment variables, or pass
+command-line flags. Run `netbox_zabbix_sync.py --help` for the available flags.
+For example:
+
+```sh
+cp config.py.example config.py
+```
+
+For Docker, mount your `config.py` at `/opt/netbox-zabbix/config.py`.
+
+The connection settings are provided through these environment variables:
+
+```bash
+NETBOX_HOST=https://netbox.example.com
+NETBOX_TOKEN=your_netbox_token
+ZABBIX_HOST=https://zabbix.example.com
+ZABBIX_TOKEN=your_zabbix_token
+```
+
+For username/password authentication, use `ZABBIX_USER` and `ZABBIX_PASS`
+instead of `ZABBIX_TOKEN`. `NBZX_` environment variables override scalar
+configuration values; boolean values accept `1`, `true`, `yes`, or `on` to
+enable an option, and other values disable it. Keep list- and dictionary-based
+options in `config.py` so their Python types are preserved.
+For example, set `NBZX_SYNC_VMS=true` or
+`NBZX_HOSTGROUP_FORMAT="site/role"`.
+
+For custom NetBox or Zabbix CA certificates, set `REQUESTS_CA_BUNDLE` to the
+CA bundle path:
+
+```sh
+export REQUESTS_CA_BUNDLE=/path/to/your/ca-bundle.crt
+```
+
+### Sync status reports and journals
 
 Each completed sync also writes `sync-status.json` to the process working
 directory (the same directory used for `sync.log`). Mount that directory if a
@@ -66,14 +140,14 @@ Categories disabled by configuration are not scanned for the report. A
 report-write error is logged but does not fail an otherwise completed sync; if
 that happens, the previous report remains in place.
 
-Sync outcomes are also recorded on the source record as NetBox journal entries
-for devices (including OOB imports), VMs, ONTAP clusters, and Azure subscription
-Tenants. A new entry is added only when the previous status for that target and
-Zabbix instance differs: repeated successes or failures with the same reason do
-not add duplicate entries. Entries record successful or failed attempted syncs;
-skipped, removed, and filter-excluded targets are not journaled. Journal lookup
-or write errors are logged without stopping the Zabbix sync. The NetBox token
-must be allowed to read and create journal entries.
+Sync outcomes are recorded on the source record as NetBox status journal
+entries for devices (including OOB imports), VMs, ONTAP clusters, and Azure
+subscription Tenants. A new entry is added only when the previous status for
+that target and Zabbix instance differs. Skipped, removed, and filter-excluded
+targets are not status-journaled. This transition reporting is independent of
+`create_journal`, which controls detailed per-action entries. Journal lookup or
+write errors are logged without stopping the Zabbix sync. The NetBox token must
+be allowed to read and create journal entries.
 
 The Zabbix endpoint from `ZABBIX_HOST` identifies the instance by default. Set
 `sync_status_instance_id` to a stable, unique label if multiple sync processes
@@ -86,106 +160,48 @@ sync_status_instance_id = "zabbix-production"
 The same setting can be provided through `NBZX_SYNC_STATUS_INSTANCE_ID` or the
 `--sync-status-instance-id` command-line option.
 
-The image uses the default `config.py` for its configuration, you can use a
-volume mount in the docker run command to override with your own config file if
-needed (see [config file](#config-file)):
+## Documentation
 
-```bash
-docker run -d -t -i -v $(pwd)/config.py:/opt/netbox-zabbix/config.py ...
-```
+The [upstream wiki](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki)
+covers core setup and sync behavior. This README retains the fork-specific
+configuration reference below.
 
-## Installation from Source
+| Page | Contents |
+| ---- | -------- |
+| [Quick Start](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Quick-Start) | A first sync in a few minutes |
+| [Installation](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Installation) | Docker, Python package, and source installs |
+| [Preparation](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Netbox-preperations) | Custom fields, API permissions, and custom links |
+| [Configuration](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Configuration) | Core settings, environment variables, and logging |
+| [Sync Behavior](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Sync-Behavior) | Hostgroups, templates, interfaces, proxies, and inventory |
+| [Functional tests](tests/functional/README.md) | Running the container-backed NetBox and Zabbix suite |
+| [Fork-specific configuration](#fork-specific-configuration-reference) | Azure, ONTAP, adoption, cleanup, filters, and OOB modes |
 
-### Cloning the repository
-
-```bash
-git clone https://github.com/TheNetworkGuy/netbox-zabbix-sync.git
-```
-
-### Development setup
+## Development
 
 Install the development dependencies and enable the formatting hook once per
 clone:
 
-```sh
+```bash
 uv sync --dev
 uv run pre-commit install
 ```
 
-Before each commit, the hook formats the repository with `uv run ruff format`
-and runs `uv run ty check`.
-If it reformats a file, review and stage the change, then commit again.
+The commit hook runs `ruff format` and `ty check`; review and stage any
+formatting changes before committing again.
 
-### Packages
-
-Make sure that you have a python environment with the following packages
-installed. You can also use the `requirements.txt` file for installation with
-pip.
-
-```sh
-# Packages:
-pynetbox
-zabbix-utils
-
-# Install them through requirements.txt from a venv:
-virtualenv .venv
-source .venv/bin/activate
-.venv/bin/pip --require-virtualenv install -r requirements.txt
-```
-
-### Config file
-
-First time user? Copy the `config.py.example` file to `config.py`. This file is
-used for modifying filters and setting variables such as custom field names.
-
-```sh
-cp config.py.example config.py
-```
-
-### Override configuration with `NBZX_` environment variables
-
-Any scalar option from `config.py.example` can be overridden at runtime with an
-environment variable named `NBZX_` followed by the uppercase configuration key.
-Environment variables take precedence over both `config.py` and the built-in
-defaults. For example:
-
-```sh
-export NBZX_SYNC_VMS=true
-export NBZX_HOSTGROUP_FORMAT="site/role"
-export NBZX_CLEANUP_DELETED_HOSTS=false
-export NBZX_CLEANUP_INSTANCE_ID="production"
-```
-
-Boolean values are case-insensitive; `1`, `true`, `yes`, and `on` enable the
-option, while every other value disables it. Non-boolean values are passed to
-the application as strings. Keep list- and dictionary-based options, such as
-filters and maps, in `config.py` so they retain their required Python types.
-
-### Set environment variables
-
-Set the following environment variables:
+Run the unit tests and checks with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-ZABBIX_HOST="https://zabbix.local"
-ZABBIX_USER="username"
-ZABBIX_PASS="Password"
-NETBOX_HOST="https://netbox.local"
-NETBOX_TOKEN="secrettoken"
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check
 ```
 
-Or, you can use a Zabbix API token to login instead of using a username and
-password. In that case `ZABBIX_USER` and `ZABBIX_PASS` will be ignored.
+The functional tests run the sync against real NetBox and Zabbix containers;
+see [tests/functional/README.md](tests/functional/README.md).
 
-```bash
-ZABBIX_TOKEN=othersecrettoken
-```
-
-If you are using custom SSL certificates for NetBox and/or Zabbix, you can set
-the following environment variable to the path of your CA bundle file:
-
-```sh
-export REQUESTS_CA_BUNDLE=/path/to/your/ca-bundle.crt
-```
+## Fork-specific configuration reference
 
 ### NetBox custom fields
 
@@ -661,15 +677,19 @@ By default, NetBox will only return the following properties under the 'site' ke
 - slug
 - description
 
-However, NetBox-Zabbix-Sync allows you to extend these site properties with the full site information
-so you can use this data in inventory fields, tags and usermacros.
+However, NetBox-Zabbix-Sync can extend these site properties with the full site
+information so you can use it in inventory fields, tags, usermacros, or config
+contexts. When an inventory, tag, or usermacro map references a site property
+omitted from NetBox's nested site data, the sync loads full site details before
+applying the map.
 
-To enable this functionality, enable the following setting in your configuration file:
+Set the following option to preload site details for other uses as well:
 
 `extended_site_properties = True`
 
-Keep in mind that enabling this option will increase the number of API calls to your NetBox instance,
-this might impact performance on large syncs.
+This can add NetBox API requests when no other sync operation needs the full
+site record. Hostgroup generation may already load the same record for a
+synced device or VM.
 
 ### Device status
 
@@ -1066,11 +1086,11 @@ For example:
 ```python
 usermacro_sync = True
 device_usermacro_map = {"serial": "{$HW_SERIAL}",
-                        "role/name": "{$DEV_ROLE}", 
+                        "role/name": "{$DEV_ROLE}",
                         "url": "{$NB_URL}",
                         "id": "{$NB_ID}"}
 vm_usermacro_map = {"memory": "{$TOTAL_MEMORY}",
-                    "role/name": "{$DEV_ROLE}", 
+                    "role/name": "{$DEV_ROLE}",
                     "url": "{$NB_URL}",
                     "id": "{$NB_ID}"}
 ```
@@ -1384,3 +1404,7 @@ since the data in NetBox is plain-text.
 > **_NOTE:_** Not all SNMP data is required for a working configuration.
 > [The following parameters are allowed](https://www.zabbix.com/documentation/current/manual/api/reference/hostinterface/object#details_tag "The following parameters are allowed") but
 > are not all required, depending on your environment.
+
+## License
+
+This project is licensed under the MIT license. See [LICENSE](LICENSE).

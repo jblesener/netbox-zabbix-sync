@@ -57,10 +57,10 @@ EXPECTED_HOSTGROUP = f"{SITE_NAME}/{MANUFACTURER_NAME}/{ROLE_NAME}"
 EXPECTED_VM_HOSTGROUP = f"{CLUSTER_TYPE_NAME}/{CLUSTER_NAME}/{ROLE_NAME}"
 
 # Geo data on the site. NetBox does not include these in the *nested* site it
-# returns on a device, so they are only reachable once `extended_site_properties`
-# has called full_details() -- which is exactly what the extended_site_properties
-# tests use them to prove. Stored as strings because that is how NetBox returns
-# these decimal fields, and field_mapper str()s whatever it finds.
+# returns on a device, so they are only reachable after full_details() -- called
+# explicitly by the setting or automatically when a map requires the fields.
+# Stored as strings because that is how NetBox returns these decimal fields,
+# and field_mapper str()s whatever it finds.
 SITE_LATITUDE = "52.370216"
 SITE_LONGITUDE = "4.895168"
 

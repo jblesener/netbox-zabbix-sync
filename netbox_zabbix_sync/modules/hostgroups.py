@@ -63,11 +63,11 @@ class Hostgroup:
             if self.nb.site:
                 if self.nb.site.region:
                     format_options["region"] = self.generate_parents(
-                        "region", str(self.nb.site.region)
+                        "region", self.nb.site.region
                     )
                 if self.nb.site.group:
                     format_options["site_group"] = self.generate_parents(
-                        "site_group", str(self.nb.site.group)
+                        "site_group", self.nb.site.group
                     )
             format_options["role"] = role
             format_options["site"] = self.nb.site.name if self.nb.site else None
@@ -204,12 +204,13 @@ class Hostgroup:
         """
         Generates parent objects to implement nested regions / nested site groups
         INPUT: nest_type to set which type of nesting is going to be processed
-        child_object: the name of the child object (for instance the last NB region)
+        child_object: the NetBox object or name of the child object
         OUTPUT: STRING - Either the single child name or child and parents.
         """
+        child_name = str(child_object)
         # Check if this type of nesting is supported.
         if nest_type not in self.nested_objects:
-            return child_object
+            return child_name
         # If the nested flag is True, perform parent calculation
         if self.nested_objects[nest_type]["flag"]:
             final_nested_object = build_path(
@@ -217,4 +218,4 @@ class Hostgroup:
             )
             return "/".join(final_nested_object)
         # Nesting is not allowed for this object. Return child_object
-        return child_object
+        return child_name

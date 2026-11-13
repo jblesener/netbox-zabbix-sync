@@ -43,6 +43,9 @@ from netbox_zabbix_sync.modules.tools import (
 from netbox_zabbix_sync.modules.virtual_machine import VirtualMachine
 
 logger = get_logger()
+_NESTED_SITE_PROPERTIES = frozenset(
+    {"id", "url", "display", "name", "slug", "description"}
+)
 
 
 class UnsyncedSummary:
@@ -374,6 +377,41 @@ class Sync:
             if self._record_id(record) not in selected_ids
         ]
         return selected, list(records_by_id.values()), custom_field_excluded
+
+    @staticmethod
+    def _site_details_needed(host):
+        """Return whether site details must be available before mapping fields."""
+        config = host.config
+        if config.get("extended_site_properties"):
+            return True
+
+        mappings = []
+        if config.get("inventory_sync") and config.get("inventory_mode") in {
+            "manual",
+            "automatic",
+        }:
+            mappings.append(host._inventory_map())
+        if config.get("usermacro_sync"):
+            mappings.append(host._usermacro_map())
+        if config.get("tag_sync"):
+            mappings.append(host._tag_map())
+
+        return any(
+            isinstance(path, str)
+            and path.startswith("site/")
+            and path.removeprefix("site/").split("/", 1)[0]
+            not in _NESTED_SITE_PROPERTIES
+            for mapping in mappings
+            if isinstance(mapping, Mapping)
+            for path in mapping
+        )
+
+    def _extend_site_properties(self, host, netbox_object):
+        site = getattr(netbox_object, "site", None)
+        if site is None or not self._site_details_needed(host):
+            return
+        logger.debug("Host %s: extending site information.", host.name)
+        site.full_details()
 
     def _add_status_target(
         self,
@@ -1024,9 +1062,7 @@ class Sync:
             )
             return True
 
-        if self.config["extended_site_properties"] and nb_object.site:
-            logger.debug("Host %s: extending site information.", vm.name)
-            nb_object.site.full_details()
+        self._extend_site_properties(vm, nb_object)
         if source_type == "vm" and self.config["extended_ips"]:
             logger.debug("Host %s: extending IP information.", vm.name)
             extend_ips(nb_object)
@@ -1164,9 +1200,7 @@ class Sync:
                 device_config["hostgroup_format"], netbox_site_groups, netbox_regions
             )
 
-        if device_config["extended_site_properties"] and nb_device.site:
-            logger.debug("Host %s: extending site information.", device.name)
-            nb_device.site.full_details()
+        self._extend_site_properties(device, nb_device)
         if device_config["extended_virtual_chassis"] and nb_device.virtual_chassis:
             logger.debug("Host %s: extending virtual chassis information.", device.name)
             nb_device.virtual_chassis.full_details()
@@ -1502,7 +1536,7 @@ class Sync:
         # Create API call to get all custom fields which are on the device objects
         device_cfs = list(
             self.netbox.extras.custom_fields.filter(
-                type=["text", "object", "select"], content_types="dcim.device"
+                type=["text", "object", "select"], object_type="dcim.device"
             )
         )
         # Check if the provided Hostgroup layout is valid
@@ -1516,7 +1550,7 @@ class Sync:
             vm_cfs = list(
                 self.netbox.extras.custom_fields.filter(
                     type=["text", "object", "select"],
-                    content_types="virtualization.virtualmachine",
+                    object_type="virtualization.virtualmachine",
                 )
             )
             verify_hg_format(

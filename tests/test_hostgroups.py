@@ -385,6 +385,28 @@ class TestHostgroups(unittest.TestCase):
             # Should include the parent region
             self.assertEqual(result, "TestSite/ParentRegion/TestRegion/TestRole")
 
+    def test_nested_regions_with_reused_parent_name(self):
+        """Resolve the region ancestry by record ID when names are repeated."""
+        self.mock_device.site.region.id = 5
+        regions = [
+            {"id": 1, "name": "EU", "_depth": 0, "parent": None},
+            {"id": 2, "name": "US", "_depth": 0, "parent": None},
+            {"id": 3, "name": "North", "_depth": 1, "parent": 1},
+            {"id": 4, "name": "North", "_depth": 1, "parent": 2},
+            {"id": 5, "name": "TestRegion", "_depth": 2, "parent": 3},
+        ]
+
+        hostgroup = Hostgroup(
+            "dev",
+            self.mock_device,
+            "4.0",
+            self.mock_logger,
+            nested_region_flag=True,
+            nb_regions=regions,
+        )
+
+        self.assertEqual(hostgroup.format_options["region"], "EU/North/TestRegion")
+
     def test_nested_sitegroup_hostgroups(self):
         """Test hostgroup generation with nested site groups."""
         # Mock the build_path function to return a predictable result

@@ -21,6 +21,17 @@ def convert_recordset(recordset):
     return recordlist
 
 
+def _record_id(record):
+    """Return a NetBox record ID when one is available."""
+    if isinstance(record, int):
+        return record
+    if isinstance(record, dict):
+        record = record.get("id")
+    else:
+        record = getattr(record, "id", None)
+    return record if isinstance(record, (int, str)) else None
+
+
 def build_path(endpoint, list_of_dicts):
     """
     Builds a path list of related parent/child items.
@@ -28,13 +39,22 @@ def build_path(endpoint, list_of_dicts):
     be used in hostgroups.
     """
     item_path = []
-    itemlist = [i for i in list_of_dicts if i["name"] == endpoint]
+    endpoint_id = _record_id(endpoint)
+    if endpoint_id is None:
+        itemlist = [i for i in list_of_dicts if i["name"] == str(endpoint)]
+    else:
+        itemlist = [i for i in list_of_dicts if i.get("id") == endpoint_id]
     item = itemlist[0] if len(itemlist) == 1 else None
     if item is None:
         return []
     item_path.append(item["name"])
     while item["_depth"] > 0:
-        itemlist = [i for i in list_of_dicts if i["name"] == str(item["parent"])]
+        parent = item["parent"]
+        parent_id = _record_id(parent)
+        if parent_id is None:
+            itemlist = [i for i in list_of_dicts if i["name"] == str(parent)]
+        else:
+            itemlist = [i for i in list_of_dicts if i.get("id") == parent_id]
         item = itemlist[0] if len(itemlist) == 1 else None
         if item is None:
             break
