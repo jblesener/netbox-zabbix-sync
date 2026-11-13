@@ -198,6 +198,18 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(merged[0]["macro"], "{$FOO}")
         self.assertEqual(merged[0]["value"], "from-context")
 
+    def test_generate_config_context_clear_overrides_field_macro(self):
+        config_context = {"zabbix": {"usermacros": {"{$FOO}": {"type": "clear"}}}}
+        nb = DummyNB(config_context=config_context, serial="from-map")
+        macros = ZabbixUsermacros(
+            nb, {"serial": "{$FOO}"}, "partial", logger=self.logger
+        )
+
+        result = macros.generate()
+
+        self.assertEqual(result, [])
+        self.assertEqual(macros.macros_to_clear, {"{$FOO}"})
+
     def test_generate_from_config_context(self):
         config_context = {"zabbix": {"usermacros": {"{$TEST_MACRO}": "test_value"}}}
         nb = self.netbox.device(config_context=config_context)
@@ -419,6 +431,26 @@ class TestZabbixUsermacros(unittest.TestCase):
                 },
             ],
         )
+
+    def test_partial_merge_removes_only_explicitly_cleared_macros(self):
+        zabbix_macros = [
+            {"macro": "{$REMOVE}", "value": "old", "type": "0", "description": ""},
+            {
+                "macro": "{$ZABBIX_ONLY}",
+                "value": "keep",
+                "type": "0",
+                "description": "",
+            },
+        ]
+        netbox_macros = [
+            {"macro": "{$REMOVE}", "value": "mapped", "type": "0", "description": ""}
+        ]
+
+        result = ZabbixUsermacros.merge_partial(
+            zabbix_macros, netbox_macros, {"{$REMOVE}"}
+        )
+
+        self.assertEqual(result, [zabbix_macros[1]])
 
     def test_partial_merge_keeps_existing_secret_macro_in_sync_shape(self):
         zabbix_macros = [{"macro": "{$SECRET}", "type": "1", "description": "secret"}]

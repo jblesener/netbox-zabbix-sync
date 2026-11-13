@@ -20,6 +20,7 @@ class ZabbixUsermacros:
         self.usermacro_map = usermacro_map
         self.logger = logger if logger else getLogger(__name__)
         self.usermacros = {}
+        self.macros_to_clear: set[str] = set()
         self.usermacro_sync = usermacro_sync
         self.sync = False
         self.force_sync = False
@@ -48,16 +49,23 @@ class ZabbixUsermacros:
         return True
 
     @staticmethod
-    def merge_partial(zabbix_macros, netbox_macros):
+    def merge_partial(zabbix_macros, netbox_macros, macros_to_clear=()):
         """
         Merge NetBox macros into the existing Zabbix macro list by macro name.
         """
-        netbox_by_name = {macro["macro"]: macro for macro in netbox_macros}
+        clear_names = set(macros_to_clear)
+        netbox_by_name = {
+            macro["macro"]: macro
+            for macro in netbox_macros
+            if macro["macro"] not in clear_names
+        }
         merged = []
         merged_names = set()
 
         for macro in zabbix_macros:
             name = macro["macro"]
+            if name in clear_names:
+                continue
             if name in netbox_by_name:
                 if name not in merged_names:
                     merged.append(netbox_by_name[name])
@@ -228,6 +236,7 @@ class ZabbixUsermacros:
         Generate full set of Usermacros
         """
         macros = []
+        self.macros_to_clear = set()
         data = {}
         # Parse the field mapper for usermacros
         if self.usermacro_map:
@@ -254,6 +263,20 @@ class ZabbixUsermacros:
                 )
             else:
                 for macro, properties in context_macros.items():
+                    if (
+                        isinstance(properties, dict)
+                        and isinstance(properties.get("type"), str)
+                        and properties["type"].lower() == "clear"
+                    ):
+                        if self.validate_macro(macro):
+                            self.macros_to_clear.add(macro)
+                        else:
+                            self.logger.warning(
+                                "Host %s: Usermacro %s is not a valid usermacro name, skipping.",
+                                self.name,
+                                macro,
+                            )
+                        continue
                     expanded_properties = self._expand_config_context_properties(
                         macro, properties
                     )
@@ -262,7 +285,12 @@ class ZabbixUsermacros:
                     m = self.render_macro(macro, expanded_properties)
                     if m:
                         macros.append(m)
+        macros = [
+            macro for macro in macros if macro["macro"] not in self.macros_to_clear
+        ]
         data = {"macros": macros}
+        if self.macros_to_clear:
+            data["macros_to_clear"] = sorted(self.macros_to_clear)
         self.logger.debug(
             "Host %s: Resolved macros: %s", self.name, sanatize_log_output(data)
         )

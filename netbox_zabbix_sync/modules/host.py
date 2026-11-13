@@ -106,6 +106,7 @@ class Host(ABC):
         self.inventory = {}
         self.ipmi = {}
         self.usermacros = []
+        self.usermacros_to_clear: set[str] = set()
         self.tags = []
         self.logger = logger if logger else getLogger(__name__)
         self._set_basics()
@@ -580,9 +581,11 @@ class Host(ABC):
         )
         if macros.sync is False:
             self.usermacros = []
+            self.usermacros_to_clear = set()
             return True
 
         self.usermacros = macros.generate()
+        self.usermacros_to_clear = set(macros.macros_to_clear)
         return True
 
     def set_tags(self):

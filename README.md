@@ -991,7 +991,9 @@ usermacro_sync = "partial"
 
 In partial mode, NetBox usermacros from both config context and field maps
 overwrite existing Zabbix usermacros with the same name. Usermacros that exist
-only in Zabbix are left unchanged.
+only in Zabbix are left unchanged unless a config-context `type: "clear"`
+directive explicitly names one to remove. Automatically discovered macros
+remain protected.
 
 There are two NetBox sources that can be used to populate usermacros:
 
@@ -1011,6 +1013,7 @@ Through this method, it is possible to define the following types of usermacros:
 1. Text
 2. Secret
 3. Vault
+4. Clear (a deletion directive, not a Zabbix macro type)
 
 The default macro type is text, if no `type` and `value` have been set.
 It is also possible to create usermacros with
@@ -1037,6 +1040,9 @@ Examples:
                 "type": "text",
                 "value": "another test value"
             },
+            "{$REMOVE_MACRO}": {
+                "type": "clear"
+            },
             "{$VMWARE.URL}": {
                 "type": "text",
                 "value": "https://{netbox:name}/sdk"
@@ -1046,6 +1052,13 @@ Examples:
 }
 
 ```
+
+Use `{"type": "clear"}` on a named config-context macro to remove that macro
+from the Zabbix host; no `value` is required or sent. In partial mode, only the
+named manual macro is removed and other Zabbix-only macros remain. Automatically
+discovered macros remain protected. A clear directive overrides a field-map
+macro with the same name. A plain `"value": "clear"` is treated as the literal
+value `clear`.
 
 Config context usermacro values can expand data from the NetBox object being
 synced by using `{netbox:<path>}` placeholders. The path uses the same `/`

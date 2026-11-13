@@ -1269,7 +1269,9 @@ class PhysicalDevice(Host):
                 for macro in host["macros"]
                 if str(macro.get("automatic", "0")) != "1"
             ]
-            netbox_macros = ZabbixUsermacros.merge_partial(manual, netbox_macros)
+            netbox_macros = ZabbixUsermacros.merge_partial(
+                manual, netbox_macros, self.usermacros_to_clear
+            )
 
         desired_macros = automatic + netbox_macros
         compare_macros = deepcopy(desired_macros)
@@ -1785,9 +1787,11 @@ class PhysicalDevice(Host):
         )
         if macros.sync is False:
             self.usermacros = []
+            self.usermacros_to_clear = set()
             return True
 
         self.usermacros = macros.generate()
+        self.usermacros_to_clear = set(macros.macros_to_clear)
         return True
 
     def set_tags(self):
@@ -2423,10 +2427,10 @@ class PhysicalDevice(Host):
 
             if partial_sync_bit:
                 compare_macros = ZabbixUsermacros.merge_partial(
-                    host["macros"], netbox_macros
+                    host["macros"], netbox_macros, self.usermacros_to_clear
                 )
                 update_macros = ZabbixUsermacros.merge_partial(
-                    host["macros"], self.usermacros
+                    host["macros"], self.usermacros, self.usermacros_to_clear
                 )
             else:
                 compare_macros = netbox_macros

@@ -5135,10 +5135,10 @@ class TestAdoptExistingHosts(unittest.TestCase):
 
     @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
     @patch("netbox_zabbix_sync.modules.core.nbapi")
-    def test_lld_macro_update_preserves_discovery_macros_without_automatic_flag(
+    def test_lld_macro_update_preserves_discovery_macros_and_applies_clear_directive(
         self, mock_api, mock_zabbix_api
     ):
-        """LLD automatic macros remain discovery-owned during host updates."""
+        """A context clear removes its macro without dropping unrelated macros."""
         vm = MockNetboxVM(
             name="lld-macro-update",
             status_label="Active",
@@ -5149,6 +5149,7 @@ class TestAdoptExistingHosts(unittest.TestCase):
                     "usermacros": {
                         "{$TOTAL_MEMORY}": "4096",
                         "{$NB_ID}": "new",
+                        "{$REMOVE}": {"type": "clear"},
                     },
                 }
             },
@@ -5176,6 +5177,14 @@ class TestAdoptExistingHosts(unittest.TestCase):
             {
                 "hostmacroid": "402",
                 "macro": "{$NB_ID}",
+                "value": "old",
+                "type": "0",
+                "description": "",
+                "automatic": "0",
+            },
+            {
+                "hostmacroid": "403",
+                "macro": "{$REMOVE}",
                 "value": "old",
                 "type": "0",
                 "description": "",
@@ -5217,6 +5226,62 @@ class TestAdoptExistingHosts(unittest.TestCase):
         )
         self.assertTrue(all("automatic" not in macro for macro in macros))
         self.assertEqual(macros[0]["hostmacroid"], "400")
+
+    @patch("netbox_zabbix_sync.modules.core.ZabbixAPI")
+    @patch("netbox_zabbix_sync.modules.core.nbapi")
+    def test_partial_context_clear_removes_only_named_manual_macro(
+        self, mock_api, mock_zabbix_api
+    ):
+        """A clear directive deletes one macro and preserves Zabbix-only peers."""
+        device = MockNetboxDevice(
+            name="partial-clear-device",
+            status_label="Active",
+            zabbix_hostid=77,
+            config_context={"zabbix": {"usermacros": {"{$REMOVE}": {"type": "clear"}}}},
+        )
+        self._setup_netbox_mock(mock_api, devices=[device])
+        mock_zabbix = self._setup_zabbix_mock(mock_zabbix_api)
+        host = self._make_zabbix_host(hostname=device.name, status="0")[0]
+        host["macros"] = [
+            {
+                "hostmacroid": "404",
+                "macro": "{$REMOVE}",
+                "value": "old",
+                "type": "0",
+                "description": "",
+                "automatic": "0",
+            },
+            {
+                "hostmacroid": "405",
+                "macro": "{$ZABBIX_ONLY}",
+                "value": "keep",
+                "type": "0",
+                "description": "",
+                "automatic": "0",
+            },
+        ]
+        mock_zabbix.host.get.return_value = [host]
+
+        syncer = Sync({"usermacro_sync": "partial", "device_usermacro_map": {}})
+        syncer.connect(
+            "http://netbox.local",
+            "nb_token",
+            "http://zabbix.local",
+            "user",
+            "pass",
+            None,
+        )
+        syncer.start()
+
+        macro_update = next(
+            update
+            for update in mock_zabbix.host.update.call_args_list
+            if "macros" in update.kwargs
+        )
+        self.assertEqual(
+            [macro["macro"] for macro in macro_update.kwargs["macros"]],
+            ["{$ZABBIX_ONLY}"],
+        )
 
 
 class TestOntapClusterSync(unittest.TestCase):
