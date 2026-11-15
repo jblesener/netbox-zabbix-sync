@@ -1268,6 +1268,37 @@ In the example above the host will use the group on Zabbix 7. On Zabbix 6 and
 below the host will use the proxy. Zabbix 7 will use the proxy value when
 omitting the proxy_group value.
 
+#### Use the Zabbix server for an individual host
+
+Set `proxy_mode` to `server` in the host's config context to override proxy
+groups, proxies, and device- or site-level proxy custom fields:
+
+```json
+{
+    "zabbix": {
+        "proxy_mode": "server"
+    }
+}
+```
+
+The override switches an existing host to the Zabbix server even when
+`full_proxy_sync` is disabled. It only changes hosts explicitly configured
+with `proxy_mode: "server"`; other hosts retain the normal proxy behavior.
+For a separate-host OOB import, set the mode inside the OOB context:
+
+```json
+{
+    "zabbix": {
+        "oob": {
+            "proxy_mode": "server"
+        }
+    }
+}
+```
+
+`server` is the only supported value. An unsupported value is logged and the
+normal proxy-resolution order is used.
+
 #### Custom Field
 
 Alternatively, you can use a custom field for assigning a device or VM to

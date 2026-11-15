@@ -47,6 +47,7 @@ class Host(ABC):
     tenant: Record
     config_context: dict
     zbxproxy: dict | None
+    proxy_mode_server: bool
     zabbix_state: int
     journal: bool
     nb_journals: Endpoint
@@ -110,6 +111,7 @@ class Host(ABC):
         self.zabbix_only_usermacros: list[str] | None = None
         self.tags = []
         self.logger = logger if logger else getLogger(__name__)
+        self.proxy_mode_server = self._proxy_mode_uses_server()
         self._set_basics()
 
     def __repr__(self):
@@ -617,6 +619,10 @@ class Host(ABC):
 
         input: List of all proxies and proxy groups in standardized format
         """
+        if self.proxy_mode_server:
+            self.zbxproxy = None
+            return False
+
         # Proxy group takes priority over a proxy due
         # to it being HA and therefore being more reliable
         # Includes proxy group fix since Zabbix <= 6 should ignore this
@@ -680,6 +686,48 @@ class Host(ABC):
                     "Host %s: unable to find proxy %s", self.name, proxy_name
                 )
         return False
+
+    def _proxy_mode_uses_server(self) -> bool:
+        """Return whether config context explicitly selects the Zabbix server."""
+        if not isinstance(self.config_context, Mapping):
+            return False
+        zabbix_context = self.config_context.get("zabbix", {})
+        if not isinstance(zabbix_context, Mapping):
+            return False
+        if "proxy_mode" not in zabbix_context:
+            return False
+
+        mode = zabbix_context["proxy_mode"]
+        if mode is None:
+            return False
+        if mode == "server":
+            return True
+
+        self.logger.warning(
+            "Host %s: unsupported zabbix.proxy_mode value %r; expected 'server'. "
+            "Using normal proxy resolution.",
+            self.name,
+            mode,
+        )
+        return False
+
+    def _clear_zabbix_proxy(self, host: Mapping[str, Any]) -> bool:
+        """Clear an existing proxy or proxy-group assignment from one host."""
+        update_data: dict[str, int] = {}
+        zabbix_7_version = 7.0
+        if self.zabbix.version >= zabbix_7_version:
+            for key in ("proxyid", "proxy_groupid"):
+                if key in host and bool(int(host[key])):
+                    update_data[key] = 0
+            if update_data:
+                update_data["monitored_by"] = 0
+        elif "proxy_hostid" in host and bool(int(host["proxy_hostid"])):
+            update_data["proxy_hostid"] = 0
+
+        if not update_data:
+            return False
+        self.update_zabbix_host(**update_data)
+        return True
 
     def create_in_zabbix(
         self, groups: list[dict], templates: list[dict], proxies: list[dict]
@@ -1004,23 +1052,21 @@ class Host(ABC):
             for key in ("proxy_hostid", "proxyid", "proxy_groupid"):
                 if key in host and bool(int(host[key])):
                     proxy_set = True
-            if proxy_power and proxy_set:
-                # Zabbix <= 6 fix
-                self.logger.warning(
-                    "Host %s: No proxy is configured in NetBox but is configured in Zabbix."
-                    "Removing proxy config in Zabbix",
-                    self.name,
-                )
-                if "proxy_hostid" in host and bool(host["proxy_hostid"]):
-                    self.update_zabbix_host(proxy_hostid=0)
-                # Zabbix 7 proxy
-                elif "proxyid" in host and bool(host["proxyid"]):
-                    self.update_zabbix_host(proxyid=0, monitored_by=0)
-                # Zabbix 7 proxy group
-                elif "proxy_groupid" in host and bool(host["proxy_groupid"]):
-                    self.update_zabbix_host(proxy_groupid=0, monitored_by=0)
+            if (proxy_power or self.proxy_mode_server) and proxy_set:
+                if self.proxy_mode_server:
+                    self.logger.info(
+                        "Host %s: proxy_mode is server; removing proxy config.",
+                        self.name,
+                    )
+                else:
+                    self.logger.warning(
+                        "Host %s: No proxy is configured in NetBox but is configured in Zabbix."
+                        "Removing proxy config in Zabbix",
+                        self.name,
+                    )
+                self._clear_zabbix_proxy(host)
             # Checks if a proxy has been defined in Zabbix and if proxy_power config has been set
-            if proxy_set and not proxy_power:
+            if proxy_set and not proxy_power and not self.proxy_mode_server:
                 # Display error message
                 self.logger.warning(
                     "Host %s: Is configured with proxy in Zabbix but not in NetBox."

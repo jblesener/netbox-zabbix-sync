@@ -23,6 +23,7 @@ from tests.functional.conftest import (
     MONITORED_BY_PROXY_GROUP,
     MONITORED_BY_SERVER,
     proxy_assignment,
+    vm_context,
 )
 
 pytestmark = pytest.mark.functional
@@ -50,6 +51,114 @@ def test_no_proxy_leaves_the_host_on_the_server(device_factory, run_sync, zabbix
     run_sync(device.name)
 
     assert proxy_assignment(zabbix_host(device.name)) == (MONITORED_BY_SERVER, "0")
+
+
+def test_server_proxy_mode_overrides_site_custom_fields_and_context(
+    proxy_factory,
+    custom_field_factory,
+    device_factory,
+    run_sync,
+    zabbix_host,
+    seeded,
+    nb,
+):
+    proxy_name = proxy_factory()
+    group_name = proxy_factory.group()
+    proxy_cf = custom_field_factory(["dcim.device", "dcim.site"])
+    proxy_group_cf = custom_field_factory(["dcim.device", "dcim.site"])
+    site = nb.dcim.sites.get(seeded["site"].id)
+    site.custom_fields[proxy_cf] = proxy_name
+    site.custom_fields[proxy_group_cf] = group_name
+    site.save()
+    try:
+        device = device_factory(
+            config_context={
+                "zabbix": {
+                    "proxy_mode": "server",
+                    "proxy": proxy_name,
+                    "proxy_group": group_name,
+                }
+            }
+        )
+        unflagged_device = device_factory()
+
+        run_sync(device.name, proxy_cf=proxy_cf, proxy_group_cf=proxy_group_cf)
+        run_sync(
+            unflagged_device.name, proxy_cf=proxy_cf, proxy_group_cf=proxy_group_cf
+        )
+
+        assert proxy_assignment(zabbix_host(device.name)) == (
+            MONITORED_BY_SERVER,
+            "0",
+        )
+        assert (
+            zabbix_host(unflagged_device.name)["monitored_by"]
+            == MONITORED_BY_PROXY_GROUP
+        )
+    finally:
+        site.custom_fields[proxy_cf] = None
+        site.custom_fields[proxy_group_cf] = None
+        site.save()
+
+
+def test_server_proxy_mode_switches_existing_proxy_group_without_full_sync(
+    proxy_factory, device_factory, run_sync, zabbix_host
+):
+    group_name = proxy_factory.group()
+    device = device_factory(config_context={"zabbix": {"proxy_group": group_name}})
+
+    run_sync(device.name)
+    assert zabbix_host(device.name)["monitored_by"] == MONITORED_BY_PROXY_GROUP
+
+    device.local_context_data = {
+        "zabbix": {"proxy_group": group_name, "proxy_mode": "server"}
+    }
+    device.save()
+    run_sync(device.name)
+
+    host = zabbix_host(device.name)
+    assert proxy_assignment(host) == (MONITORED_BY_SERVER, "0")
+    assert host["proxy_groupid"] == "0"
+
+
+def test_server_proxy_mode_applies_to_virtual_machines(
+    proxy_factory, vm_factory, run_vm_sync, zabbix_host
+):
+    group_name = proxy_factory.group()
+    vm = vm_factory(
+        config_context=vm_context(proxy_mode="server", proxy_group=group_name)
+    )
+
+    run_vm_sync(vm.name)
+
+    assert proxy_assignment(zabbix_host(vm.name)) == (MONITORED_BY_SERVER, "0")
+
+
+def test_server_proxy_mode_applies_to_split_oob_imports(
+    proxy_factory, custom_field_factory, device_factory, run_sync, zabbix_host, zapi
+):
+    group_name = proxy_factory.group()
+    oob_device_cf = custom_field_factory(["dcim.device"], cf_type="integer")
+    device = device_factory(
+        oob_address="10.44.9.3/24",
+        config_context={"zabbix": {"oob": {"proxy_group": group_name}}},
+    )
+    oob_name = f"{device.name}-oob"
+
+    try:
+        run_sync(device.name, oob_device_cf=oob_device_cf)
+        assert zabbix_host(oob_name)["monitored_by"] == MONITORED_BY_PROXY_GROUP
+
+        device.local_context_data = {
+            "zabbix": {"oob": {"proxy_group": group_name, "proxy_mode": "server"}}
+        }
+        device.save()
+        run_sync(device.name, oob_device_cf=oob_device_cf)
+
+        assert proxy_assignment(zabbix_host(oob_name)) == (MONITORED_BY_SERVER, "0")
+    finally:
+        for host in zapi.host.get(filter={"host": oob_name}, output=["hostid"]):
+            zapi.host.delete(host["hostid"])
 
 
 def test_proxy_from_a_device_custom_field(

@@ -20,7 +20,7 @@ core.py fetches for `verify_hg_format`, so the only ones a hostgroup format can
 name, and the ones documented for the proxy settings.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pynetbox
 import pytest
@@ -40,7 +40,12 @@ NAMED_TYPES = ("text", "select", "object")
 ZABBIX_HOSTID = 42
 
 
-def nb_device(custom_fields=None, site_custom_fields=None, type_custom_fields=None):
+def nb_device(
+    custom_fields=None,
+    site_custom_fields=None,
+    type_custom_fields=None,
+    config_context=None,
+):
     """A NetBox device carrying the given custom fields.
 
     Site and device type custom fields are not in the nested form NetBox
@@ -54,6 +59,7 @@ def nb_device(custom_fields=None, site_custom_fields=None, type_custom_fields=No
             "Test Model", custom_fields=type_custom_fields or {}
         ),
         custom_fields=custom_fields,
+        config_context=config_context,
     )
 
 
@@ -87,6 +93,78 @@ class TestProxyCustomField:
         assert device._set_proxy(proxies("decoy", EXPECTED[cf_type]))
         assert device.zbxproxy is not None
         assert device.zbxproxy["name"] == EXPECTED[cf_type]
+
+    def test_server_proxy_mode_overrides_custom_fields_and_context(self):
+        nb = nb_device(
+            custom_fields={"proxy": "device-proxy", "proxy_group": "device-group"},
+            site_custom_fields={"proxy": "site-proxy", "proxy_group": "site-group"},
+            config_context={
+                "zabbix": {
+                    "proxy_mode": "server",
+                    "proxy": "context-proxy",
+                    "proxy_group": "context-group",
+                }
+            },
+        )
+        device = physical_device(nb, proxy_cf="proxy", proxy_group_cf="proxy_group")
+        proxy_list = proxies("device-proxy", "site-proxy", "context-proxy") + proxies(
+            "device-group", "site-group", "context-group", proxy_type="proxy_group"
+        )
+
+        assert device.proxy_mode_server
+        assert not device._set_proxy(proxy_list)
+        assert device.zbxproxy is None
+
+    def test_unsupported_proxy_mode_warns_and_keeps_proxy_resolution(self):
+        logger = MagicMock()
+        nb = nb_device(
+            config_context={"zabbix": {"proxy_mode": "proxy", "proxy": "context-proxy"}}
+        )
+        device = physical_device(nb, logger=logger)
+
+        assert not device.proxy_mode_server
+        assert device._set_proxy(proxies("context-proxy"))
+        logger.warning.assert_called_once()
+        assert "unsupported zabbix.proxy_mode" in logger.warning.call_args.args[0]
+
+
+class TestServerProxyOverride:
+    @pytest.mark.parametrize(
+        ("version", "host", "expected"),
+        [
+            (6.0, {"proxy_hostid": "12"}, {"proxy_hostid": 0}),
+            (
+                7.0,
+                {"proxyid": "12", "proxy_groupid": "0"},
+                {"proxyid": 0, "monitored_by": 0},
+            ),
+            (
+                7.0,
+                {"proxyid": "0", "proxy_groupid": "12"},
+                {"proxy_groupid": 0, "monitored_by": 0},
+            ),
+        ],
+    )
+    def test_clears_proxy_assignment_using_version_specific_fields(
+        self, version, host, expected
+    ):
+        device = physical_device(nb_device())
+        device.zabbix.version = version
+
+        with patch.object(device, "update_zabbix_host") as update:
+            assert device._clear_zabbix_proxy(host)
+
+        update.assert_called_once_with(**expected)
+
+    def test_does_not_update_a_host_already_using_the_server(self):
+        device = physical_device(nb_device())
+
+        with patch.object(device, "update_zabbix_host") as update:
+            assert not device._clear_zabbix_proxy(
+                {"proxy_hostid": "0", "proxyid": "0", "proxy_groupid": "0"}
+            )
+
+        update.assert_not_called()
 
     @pytest.mark.parametrize(("value", "cf_type"), cf_cases(*NAMED_TYPES))
     def test_proxy_falls_back_to_the_site(self, value, cf_type):

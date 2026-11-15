@@ -1915,6 +1915,10 @@ class PhysicalDevice(Host):
 
         input: List of all proxies and proxy groups in standardized format
         """
+        if self.proxy_mode_server:
+            self.zbxproxy = None
+            return False
+
         # Proxy group takes priority over a proxy due
         # to it being HA and therefore being more reliable
         # Includes proxy group fix since Zabbix <= 6 should ignore this
@@ -2366,23 +2370,21 @@ class PhysicalDevice(Host):
                 for key in ("proxy_hostid", "proxyid", "proxy_groupid"):
                     if key in host and bool(int(host[key])):
                         proxy_set = True
-                if proxy_power and proxy_set:
-                    # Zabbix <= 6 fix
-                    self.logger.warning(
-                        "Host %s: No proxy is configured in NetBox but is configured in Zabbix."
-                        "Removing proxy config in Zabbix",
-                        self.name,
-                    )
-                    if "proxy_hostid" in host and bool(host["proxy_hostid"]):
-                        self.update_zabbix_host(proxy_hostid=0)
-                    # Zabbix 7 proxy
-                    elif "proxyid" in host and bool(host["proxyid"]):
-                        self.update_zabbix_host(proxyid=0, monitored_by=0)
-                    # Zabbix 7 proxy group
-                    elif "proxy_groupid" in host and bool(host["proxy_groupid"]):
-                        self.update_zabbix_host(proxy_groupid=0, monitored_by=0)
+                if (proxy_power or self.proxy_mode_server) and proxy_set:
+                    if self.proxy_mode_server:
+                        self.logger.info(
+                            "Host %s: proxy_mode is server; removing proxy config.",
+                            self.name,
+                        )
+                    else:
+                        self.logger.warning(
+                            "Host %s: No proxy is configured in NetBox but is configured in Zabbix."
+                            "Removing proxy config in Zabbix",
+                            self.name,
+                        )
+                    self._clear_zabbix_proxy(host)
                 # Checks if a proxy has been defined in Zabbix and if proxy_power config has been set
-                if proxy_set and not proxy_power:
+                if proxy_set and not proxy_power and not self.proxy_mode_server:
                     # Display error message
                     self.logger.warning(
                         "Host %s: Is configured with proxy in Zabbix but not in NetBox."
@@ -2391,6 +2393,9 @@ class PhysicalDevice(Host):
                     )
                 if not proxy_set:
                     self.logger.debug("Host %s: Proxy in-sync.", self.name)
+        if self.proxy_mode_server and not full_sync:
+            self._clear_zabbix_proxy(host)
+
         # Inventory and TLS can be set by an LLD host prototype, so leave them
         # untouched for discovered hosts along with other scalar host settings.
         if not discovered_host:
