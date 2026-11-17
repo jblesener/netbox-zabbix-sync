@@ -190,60 +190,59 @@ class ZabbixUsermacros:
         """
         Renders a full usermacro from partial input
         """
-        macro = {}
-        macrotypes = {"text": 0, "secret": 1, "vault": 2}
-        if self.validate_macro(macro_name):
-            macro["macro"] = str(macro_name)
-            if isinstance(macro_properties, dict):
-                if "value" not in macro_properties:
-                    self.logger.info(
-                        "Host %s: Usermacro %s has no value in Netbox, skipping.",
-                        self.name,
-                        macro_name,
-                    )
-                    return False
-                macro["value"] = macro_properties["value"]
-
-                macro_type = macro_properties.get("type")
-                if isinstance(macro_type, str) and macro_type.lower() in macrotypes:
-                    macro["type"] = str(macrotypes[macro_type.lower()])
-                else:
-                    macro["type"] = str(0)
-
-                if "description" in macro_properties and isinstance(
-                    macro_properties["description"], str
-                ):
-                    macro["description"] = macro_properties["description"]
-                else:
-                    macro["description"] = ""
-
-            elif isinstance(macro_properties, str) and macro_properties:
-                macro["value"] = macro_properties
-                macro["type"] = str(0)
-                macro["description"] = ""
-
-            else:
-                self.logger.info(
-                    "Host %s: Usermacro %s has no value, skipping.",
-                    self.name,
-                    macro_name,
-                )
-                return False
-        else:
+        if not self.validate_macro(macro_name):
             self.logger.warning(
                 "Host %s: Usermacro %s is not a valid usermacro name, skipping.",
                 self.name,
                 macro_name,
             )
             return False
-        if len(macro["value"]) > MAX_VALUE_SIZE:
+
+        macro = {"macro": str(macro_name), "type": "0", "description": ""}
+        if isinstance(macro_properties, dict):
+            if "value" not in macro_properties:
+                self.logger.info(
+                    "Host %s: Usermacro %s has no value in Netbox, skipping.",
+                    self.name,
+                    macro_name,
+                )
+                return False
+
+            value = macro_properties["value"]
+            macrotypes = {"text": 0, "secret": 1, "vault": 2}
+            macro_type = macro_properties.get("type")
+            if isinstance(macro_type, str) and macro_type.lower() in macrotypes:
+                macro["type"] = str(macrotypes[macro_type.lower()])
+
+            if isinstance(macro_properties.get("description"), str):
+                macro["description"] = macro_properties["description"]
+        else:
+            value = macro_properties
+
+        if not isinstance(value, str):
+            self.logger.warning(
+                "Host %s: Usermacro %s has a non-string value (%s), skipping.",
+                self.name,
+                macro_name,
+                type(value).__name__,
+            )
+            return False
+        if not value:
+            self.logger.info(
+                "Host %s: Usermacro %s has no value, skipping.",
+                self.name,
+                macro_name,
+            )
+            return False
+        if len(value) > MAX_VALUE_SIZE:
             self.logger.warning(
                 "Host %s: Usermacro %s has a value that is %s bytes which is too large, skipping.",
                 self.name,
                 macro_name,
-                len(macro["value"]),
+                len(value),
             )
             return False
+        macro["value"] = value
         return macro
 
     def generate(self):

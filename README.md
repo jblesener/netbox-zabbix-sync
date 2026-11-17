@@ -1072,7 +1072,10 @@ Config context usermacro values can expand data from the NetBox object being
 synced by using `{netbox:<path>}` placeholders. The path uses the same `/`
 separator as other NetBox field maps. For example, `{netbox:name}` resolves to
 the device or VM name and `{netbox:custom_fields/vmware_fqdn}` resolves to a
-custom field value.
+custom field value. Macro values must be non-empty strings. Non-string JSON
+values, including numbers, booleans, null, lists, and objects, are logged and
+skipped instead of being coerced to strings; quote numeric values if they
+should be sent to Zabbix.
 
 Please be aware that secret usermacros are only synced _once_ by default.
 This is the default behavior because Zabbix API won't return the value of

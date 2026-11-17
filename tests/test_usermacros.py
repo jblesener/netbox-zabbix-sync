@@ -190,6 +190,29 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertFalse(result)
         self.logger.info.assert_called()
 
+    def test_render_macro_rejects_non_string_values(self):
+        macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
+
+        for value in (1, 1.5, True, False, None, ["value"], {"value": "nested"}):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    macros.render_macro("{$FOO}", {"type": "text", "value": value})
+                )
+
+        self.logger.warning.assert_called()
+
+    def test_render_macro_rejects_non_string_direct_value(self):
+        macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
+
+        self.assertFalse(macros.render_macro("{$FOO}", 1))
+
+        self.logger.warning.assert_called_once_with(
+            "Host %s: Usermacro %s has a non-string value (%s), skipping.",
+            "dummy",
+            "{$FOO}",
+            "int",
+        )
+
     def test_render_macro_str(self):
         macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
         macro = macros.render_macro("{$FOO}", "bar")
@@ -197,6 +220,27 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(macro["value"], "bar")
         self.assertEqual(macro["type"], "0")
         self.assertEqual(macro["description"], "")
+
+    def test_render_macro_rejects_empty_string(self):
+        macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
+
+        self.assertFalse(macros.render_macro("{$FOO}", {"value": ""}))
+
+        self.logger.info.assert_called()
+
+    def test_render_macro_accepts_maximum_value_size(self):
+        macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
+
+        macro = macros.render_macro("{$FOO}", "a" * 2048)
+
+        self.assertEqual(len(macro["value"]), 2048)
+
+    def test_render_macro_rejects_value_larger_than_maximum(self):
+        macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
+
+        self.assertFalse(macros.render_macro("{$FOO}", "a" * 2049))
+
+        self.logger.warning.assert_called()
 
     def test_render_macro_invalid_name(self):
         macros = ZabbixUsermacros(self.nb, {}, False, logger=self.logger)
@@ -249,6 +293,33 @@ class TestZabbixUsermacros(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["macro"], "{$TEST_MACRO}")
         self.assertEqual(result[0]["value"], "test_value")
+
+    def test_generate_skips_non_string_value_without_aborting_siblings(self):
+        config_context = {
+            "zabbix": {
+                "usermacros": {
+                    "{$INVALID}": {"type": "text", "value": 2048},
+                    "{$VALID}": {"type": "text", "value": "valid"},
+                }
+            }
+        }
+        nb = self.netbox.device(config_context=config_context)
+        macros = ZabbixUsermacros(nb, {}, True, logger=self.logger)
+
+        result = macros.generate()
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "macro": "{$VALID}",
+                    "value": "valid",
+                    "type": "0",
+                    "description": "",
+                }
+            ],
+        )
+        self.logger.warning.assert_called_once()
 
     def test_generate_skips_non_dict_config_context_usermacros(self):
         config_context = {"zabbix": {"usermacros": [{"{$TEST_MACRO}": "test_value"}]}}
