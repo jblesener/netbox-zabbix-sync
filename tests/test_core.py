@@ -5451,6 +5451,80 @@ class TestCustomFieldFilters(unittest.TestCase):
         self.assertEqual(custom_field_excluded, [])
         endpoint.all.assert_not_called()
 
+    def test_delta_collection_unions_config_context_dependencies(self):
+        recent = SimpleNamespace(id=1, custom_fields={})
+        old_affected = SimpleNamespace(id=2, custom_fields={})
+        old_unrelated = SimpleNamespace(id=3, custom_fields={})
+        endpoint = MagicMock()
+
+        def filtered(**kwargs):
+            if "last_updated__gte" in kwargs:
+                return [recent]
+            if "role_id" in kwargs:
+                return [old_affected]
+            return [recent, old_affected, old_unrelated]
+
+        endpoint.filter.side_effect = filtered
+
+        selected, candidates, custom_field_excluded = Sync()._collect_filtered_objects(
+            endpoint,
+            {"name__n": "null", "last_updated__gte": "2026-11-26T10:45:00+00:00"},
+            object_type="device",
+            delta=True,
+            policy_filters={"name__n": "null"},
+            dependency_filters=({"role_id": [7]},),
+        )
+
+        self.assertEqual({record.id for record in selected}, {1, 2})
+        self.assertEqual({record.id for record in candidates}, {1, 2})
+        self.assertEqual(custom_field_excluded, [])
+        endpoint.all.assert_not_called()
+
+    def test_config_context_dependency_filters_preserve_custom_field_policy(self):
+        affected = SimpleNamespace(id=2, custom_fields={"environment": "Production"})
+        endpoint = MagicMock()
+        endpoint.filter.side_effect = [[affected], [affected], [affected]]
+
+        selected, candidates, custom_field_excluded = Sync()._collect_filtered_objects(
+            endpoint,
+            {"last_updated__gte": "2026-11-26T10:45:00+00:00"},
+            {"environment": "Production"},
+            "device",
+            delta=True,
+            policy_filters={},
+            dependency_filters=({"tag": ["zabbix"]},),
+        )
+
+        self.assertEqual(selected, [affected])
+        self.assertEqual(candidates, [affected])
+        self.assertEqual(custom_field_excluded, [])
+
+    def test_failed_context_scope_expansion_is_left_for_full_sync(self):
+        recent = SimpleNamespace(id=1, custom_fields={})
+        endpoint = MagicMock()
+
+        def filtered(**kwargs):
+            if "last_updated__gte" in kwargs:
+                return [recent]
+            if "role_id" in kwargs:
+                raise RuntimeError("unsupported relationship")
+            return [recent, SimpleNamespace(id=2, custom_fields={})]
+
+        endpoint.filter.side_effect = filtered
+
+        selected, candidates, custom_field_excluded = Sync()._collect_filtered_objects(
+            endpoint,
+            {"last_updated__gte": "2026-11-26T10:45:00+00:00"},
+            object_type="device",
+            delta=True,
+            policy_filters={},
+            dependency_filters=({"role_id": [7]},),
+        )
+
+        self.assertEqual(selected, [recent])
+        self.assertEqual(candidates, [recent])
+        self.assertEqual(custom_field_excluded, [])
+
     def test_invalid_custom_field_regex_fails_before_netbox_query(self):
         endpoint = MagicMock()
 
@@ -5618,6 +5692,123 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
             {target["name"] for target in report["targets"]},
             {"recent-device", "recent-vm"},
         )
+
+    def test_changed_context_expands_previous_and_current_role_scopes(self):
+        syncer = self._syncer(config={"delta_sync_minutes": 15})
+        current = SimpleNamespace(
+            id=10,
+            is_active=True,
+            roles=[SimpleNamespace(id=8)],
+            sites=[],
+            tags=[],
+        )
+        syncer.netbox.extras.config_contexts.filter.return_value = [current]
+        syncer.netbox.core.object_changes.filter.return_value = [
+            SimpleNamespace(
+                changed_object_id=10,
+                prechange_data={
+                    "is_active": True,
+                    "roles": [{"id": 7}],
+                    "sites": [],
+                    "tags": [],
+                },
+                postchange_data={
+                    "is_active": True,
+                    "roles": [{"id": 8}],
+                    "sites": [],
+                    "tags": [],
+                },
+            )
+        ]
+
+        device_filters, vm_filters, all_devices, all_vms = (
+            syncer._delta_config_context_scopes("2026-11-26T10:45:00+00:00")
+        )
+
+        self.assertEqual(
+            {repr(scope) for scope in device_filters},
+            {"{'role_id': [7]}", "{'role_id': [8]}"},
+        )
+        self.assertEqual(
+            {repr(scope) for scope in vm_filters},
+            {"{'role_id': [7]}", "{'role_id': [8]}"},
+        )
+        self.assertFalse(all_devices)
+        self.assertFalse(all_vms)
+
+    def test_changed_context_without_prior_scope_is_left_for_full_sync(self):
+        syncer = self._syncer(config={"delta_sync_minutes": 15})
+        syncer.netbox.extras.config_contexts.filter.return_value = [
+            SimpleNamespace(
+                id=10,
+                is_active=True,
+                roles=[SimpleNamespace(id=8)],
+                tags=[],
+            )
+        ]
+        syncer.netbox.core.object_changes.filter.side_effect = RuntimeError(
+            "unsupported endpoint"
+        )
+
+        _, _, all_devices, all_vms = syncer._delta_config_context_scopes(
+            "2026-11-26T10:45:00+00:00"
+        )
+
+        self.assertFalse(all_devices)
+        self.assertFalse(all_vms)
+
+    def test_unavailable_context_history_does_not_expand_delta_records(self):
+        syncer = self._syncer(config={"delta_sync_minutes": 15})
+        syncer.netbox.extras.config_contexts.filter.return_value = []
+        syncer.netbox.core.object_changes.filter.side_effect = RuntimeError(
+            "unsupported endpoint"
+        )
+
+        device_filters, vm_filters, all_devices, all_vms = (
+            syncer._delta_config_context_scopes("2026-11-26T10:45:00+00:00")
+        )
+
+        self.assertEqual(device_filters, [])
+        self.assertEqual(vm_filters, [])
+        self.assertFalse(all_devices)
+        self.assertFalse(all_vms)
+
+    def test_device_type_only_context_is_not_global_for_vms(self):
+        syncer = self._syncer(config={"delta_sync_minutes": 15})
+        syncer.netbox.extras.config_contexts.filter.return_value = [
+            SimpleNamespace(
+                id=10,
+                is_active=True,
+                device_types=[SimpleNamespace(id=6)],
+                roles=[],
+                tags=[],
+            )
+        ]
+        syncer.netbox.core.object_changes.filter.return_value = [
+            SimpleNamespace(
+                changed_object_id=10,
+                prechange_data={
+                    "is_active": True,
+                    "device_types": [{"id": 5}],
+                },
+                postchange_data={
+                    "is_active": True,
+                    "device_types": [{"id": 6}],
+                },
+            )
+        ]
+
+        device_filters, vm_filters, all_devices, all_vms = (
+            syncer._delta_config_context_scopes("2026-11-26T10:45:00+00:00")
+        )
+
+        self.assertEqual(
+            {repr(scope) for scope in device_filters},
+            {"{'device_type_id': [5]}", "{'device_type_id': [6]}"},
+        )
+        self.assertEqual(vm_filters, [])
+        self.assertFalse(all_devices)
+        self.assertFalse(all_vms)
 
     def test_full_sync_retains_complete_candidates_and_cleanup(self):
         syncer = self._syncer()

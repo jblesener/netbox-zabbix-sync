@@ -9,7 +9,7 @@ from os import environ
 from pathlib import Path
 from pprint import pformat
 from re import fullmatch
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from pynetbox import api as nbapi
@@ -368,6 +368,9 @@ class Sync:
         object_type="NetBox object",
         *,
         delta=False,
+        policy_filters=None,
+        dependency_filters=(),
+        dependency_unrestricted=False,
     ):
         """Return selected, report-candidate, and custom-field-excluded records."""
         compiled_custom_field_filters = self._compile_custom_field_filters(
@@ -375,6 +378,35 @@ class Sync:
             object_type,
         )
         netbox_filtered = list(endpoint.filter(**filters))
+        if delta and (dependency_filters or dependency_unrestricted):
+            policy_records = list(
+                endpoint.filter(
+                    **(policy_filters if policy_filters is not None else {})
+                )
+            )
+            policy_ids = {self._record_id(record) for record in policy_records}
+            records_by_id = {
+                self._record_id(record): record for record in netbox_filtered
+            }
+            if dependency_unrestricted:
+                for record in policy_records:
+                    records_by_id[self._record_id(record)] = record
+            for dependency_filter in dependency_filters:
+                try:
+                    dependency_records = endpoint.filter(**dependency_filter)
+                except Exception as error:
+                    logger.warning(
+                        "Unable to expand a changed ConfigContext for %s (%s); "
+                        "leaving that context's dependent objects for full sync.",
+                        object_type,
+                        error,
+                    )
+                    continue
+                for record in dependency_records:
+                    record_id = self._record_id(record)
+                    if record_id in policy_ids:
+                        records_by_id[record_id] = record
+            netbox_filtered = list(records_by_id.values())
         candidates = (
             list(netbox_filtered) if delta or not filters else list(endpoint.all())
         )
@@ -392,6 +424,186 @@ class Sync:
             if self._record_id(record) not in selected_ids
         ]
         return selected, list(records_by_id.values()), custom_field_excluded
+
+    _CONFIG_CONTEXT_SCOPE_FIELDS: ClassVar[dict[str, str]] = {
+        "regions": "region_id",
+        "site_groups": "site_group_id",
+        "sites": "site_id",
+        "locations": "location_id",
+        "device_types": "device_type_id",
+        "roles": "role_id",
+        "platforms": "platform_id",
+        "cluster_types": "cluster_type_id",
+        "cluster_groups": "cluster_group_id",
+        "clusters": "cluster_id",
+        "tenant_groups": "tenant_group_id",
+        "tenants": "tenant_id",
+        "tags": "tag",
+    }
+    _CONFIG_CONTEXT_DEVICE_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        _CONFIG_CONTEXT_SCOPE_FIELDS
+    )
+    _CONFIG_CONTEXT_VM_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "regions",
+            "site_groups",
+            "sites",
+            "locations",
+            "roles",
+            "platforms",
+            "cluster_types",
+            "cluster_groups",
+            "clusters",
+            "tenant_groups",
+            "tenants",
+            "tags",
+        }
+    )
+
+    @staticmethod
+    def _record_value(record, field, default=None):
+        if isinstance(record, Mapping):
+            return record.get(field, default)
+        return getattr(record, field, default)
+
+    @classmethod
+    def _context_scope_filter(cls, context, object_type):
+        allowed_fields = (
+            cls._CONFIG_CONTEXT_DEVICE_FIELDS
+            if object_type == "device"
+            else cls._CONFIG_CONTEXT_VM_FIELDS
+        )
+        scope_filter = {}
+        has_any_scope = False
+        for field in allowed_fields:
+            values = cls._record_value(context, field, []) or []
+            if not isinstance(values, (list, tuple, set)):
+                values = [values]
+            normalized = []
+            for value in values:
+                if field == "tags":
+                    related = cls._record_value(value, "slug")
+                else:
+                    related = cls._record_value(value, "id")
+                if related is not None:
+                    normalized.append(related)
+                elif isinstance(value, (str, int)):
+                    normalized.append(value)
+            if normalized:
+                scope_filter[cls._CONFIG_CONTEXT_SCOPE_FIELDS[field]] = sorted(
+                    set(normalized), key=str
+                )
+        for field in cls._CONFIG_CONTEXT_SCOPE_FIELDS:
+            values = cls._record_value(context, field, []) or []
+            if isinstance(values, (list, tuple, set)):
+                has_any_scope = has_any_scope or bool(values)
+            elif values:
+                has_any_scope = True
+        if has_any_scope and not scope_filter:
+            return None
+        return scope_filter
+
+    def _delta_config_context_scopes(self, cutoff):
+        """Return dependency filters and conservative fallback state by object type."""
+        if self.netbox is None:
+            return [], [], False, False
+        netbox = cast(Any, self.netbox)
+        try:
+            changed_contexts = list(
+                netbox.extras.config_contexts.filter(last_updated__gte=cutoff)
+            )
+        except Exception as error:
+            logger.warning(
+                "Unable to query changed ConfigContexts after %s (%s); delta "
+                "selection will leave dependent context objects for full sync.",
+                cutoff,
+                error,
+            )
+            return [], [], False, False
+        current_by_id = {
+            self._record_id(context): context for context in changed_contexts
+        }
+
+        changes_by_id: dict[int, list[Any]] = defaultdict(list)
+        try:
+            for change in netbox.core.object_changes.filter(
+                changed_object_type="extras.configcontext",
+                time_after=cutoff,
+                ordering="-time",
+            ):
+                changed_id = self._record_value(
+                    change, "changed_object_id", self._record_value(change, "object_id")
+                )
+                if changed_id is not None:
+                    changes_by_id[int(changed_id)].append(change)
+        except Exception as error:
+            logger.warning(
+                "Unable to inspect prior ConfigContext assignments after %s (%s); "
+                "dependent context objects will be left for full sync.",
+                cutoff,
+                error,
+            )
+            return [], [], False, False
+
+        context_snapshots = []
+        for context_id in current_by_id:
+            if context_id not in changes_by_id:
+                logger.warning(
+                    "No object-change before/after data is available for changed "
+                    "ConfigContext %s; leaving dependent objects for full sync.",
+                    context_id,
+                )
+        for context_id, changes in changes_by_id.items():
+            snapshots_valid = True
+            context_changes = []
+            for change in changes:
+                before = self._record_value(change, "prechange_data")
+                after = self._record_value(change, "postchange_data")
+                action = str(self._record_value(change, "action", "")).casefold()
+                if action == "create":
+                    before = {}
+                elif action == "delete":
+                    after = {}
+                if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+                    snapshots_valid = False
+                    continue
+                context_changes.extend((before, after))
+            if not snapshots_valid:
+                logger.warning(
+                    "Incomplete before/after data is available for changed "
+                    "ConfigContext %s; leaving its dependent objects for full sync.",
+                    context_id,
+                )
+                continue
+            context_snapshots.extend(context_changes)
+
+        device_filters = []
+        vm_filters = []
+        device_unrestricted = False
+        vm_unrestricted = False
+        for snapshot in context_snapshots:
+            if not self._record_value(snapshot, "is_active", True):
+                continue
+            device_filter = self._context_scope_filter(snapshot, "device")
+            vm_filter = self._context_scope_filter(snapshot, "vm")
+            if device_filter:
+                device_filters.append(device_filter)
+            elif device_filter == {}:
+                device_unrestricted = True
+            if vm_filter:
+                vm_filters.append(vm_filter)
+            elif vm_filter == {}:
+                vm_unrestricted = True
+
+        device_filters = list(
+            {
+                repr(scope_filter): scope_filter for scope_filter in device_filters
+            }.values()
+        )
+        vm_filters = list(
+            {repr(scope_filter): scope_filter for scope_filter in vm_filters}.values()
+        )
+        return device_filters, vm_filters, device_unrestricted, vm_unrestricted
 
     @staticmethod
     def _site_details_needed(host):
@@ -1609,8 +1821,19 @@ class Sync:
         dev_filter_combined = self._combine_filters(
             self.config["nb_device_filter"], device_filter
         )
+        device_policy_filter = dict(dev_filter_combined)
         if delta_cutoff is not None:
             dev_filter_combined["last_updated__gte"] = delta_cutoff
+        (
+            device_context_filters,
+            vm_context_filters,
+            device_context_unrestricted,
+            vm_context_unrestricted,
+        ) = (
+            self._delta_config_context_scopes(delta_cutoff)
+            if delta_cutoff is not None
+            else ([], [], False, False)
+        )
         (
             netbox_devices,
             all_netbox_devices,
@@ -1624,6 +1847,9 @@ class Sync:
             ),
             "device",
             delta=delta_sync,
+            policy_filters=device_policy_filter,
+            dependency_filters=device_context_filters,
+            dependency_unrestricted=device_context_unrestricted,
         )
         netbox_vms = []
         all_netbox_vms = []
@@ -1632,6 +1858,7 @@ class Sync:
             vm_filter_combined = self._combine_filters(
                 self.config["nb_vm_filter"], vm_filter
             )
+            vm_policy_filter = dict(vm_filter_combined)
             if delta_cutoff is not None:
                 vm_filter_combined["last_updated__gte"] = delta_cutoff
             (
@@ -1647,6 +1874,9 @@ class Sync:
                 ),
                 "VM",
                 delta=delta_sync,
+                policy_filters=vm_policy_filter,
+                dependency_filters=vm_context_filters,
+                dependency_unrestricted=vm_context_unrestricted,
             )
         netbox_ontap_clusters = []
         all_netbox_ontap_clusters = []

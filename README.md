@@ -90,6 +90,17 @@ Delta windows can overlap, so use an interval shorter than the configured
 window to avoid missing boundary changes. The overlapping records are
 reconciled idempotently.
 
+Delta runs also inspect NetBox ConfigContexts changed inside the same window.
+Changed contexts are expanded through their current assignment scopes (such as
+roles, tags, sites, device types, tenants, platforms, and clusters) so inherited
+context changes can select otherwise unchanged devices and VMs. The sync keeps
+the normal configured object and custom-field filters when expanding these
+dependencies. When NetBox object-change history provides the previous
+assignment data, removed scopes are included as well. If the before/after scope
+cannot be determined, delta mode does not expand that context to devices or VMs;
+those dependent objects are left for the next periodic full sync. The global
+deletion-cleanup pass still runs only during full sync.
+
 For Docker, append the override to the existing one-shot command:
 
 ```bash

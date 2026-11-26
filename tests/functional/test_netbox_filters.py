@@ -16,6 +16,7 @@ than in Python, once rather than once per host.
 
 import time
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
@@ -100,6 +101,43 @@ def test_delta_last_updated_filter_excludes_older_vms(
 
     assert zabbix_host(older_vm.name) is None
     assert zabbix_host(recent_vm.name) is not None
+
+
+def test_delta_config_context_change_selects_old_vm(
+    monkeypatch,
+    nb,
+    seeded,
+    vm_factory,
+    sync_runner,
+    zabbix_host,
+):
+    context = nb.extras.config_contexts.create(
+        name=f"context-delta-{uuid4().hex[:8]}",
+        data={"zabbix": {"tags": [{"context": "initial"}]}},
+        roles=[seeded["role"].id],
+        is_active=True,
+    )
+    try:
+        vm = vm_factory()
+        time.sleep(0.1)
+        context.data = {"zabbix": {"tags": [{"context": "updated"}]}}
+        context.save()
+        context = nb.extras.config_contexts.get(context.id)
+        _freeze_narrow_delta_window(monkeypatch, context.last_updated)
+
+        sync_runner(
+            device_filter={"name": NO_DEVICE},
+            vm_filter={"name": vm.name},
+            delta_sync_minutes=1,
+            sync_vms=True,
+            tag_sync=True,
+        )
+
+        host = zabbix_host(vm.name)
+        assert host is not None
+        assert {"tag": "context", "value": "updated"} in host["tags"]
+    finally:
+        context.delete()
 
 
 def test_vm_custom_field_rejected_in_device_hostgroup(
