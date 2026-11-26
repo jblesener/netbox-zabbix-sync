@@ -5525,6 +5525,35 @@ class TestCustomFieldFilters(unittest.TestCase):
         self.assertEqual(candidates, [recent])
         self.assertEqual(custom_field_excluded, [])
 
+    def test_lazy_context_scope_error_is_left_for_full_sync(self):
+        recent = SimpleNamespace(id=1, custom_fields={})
+        endpoint = MagicMock()
+
+        def lazy_failure():
+            yield SimpleNamespace(id=2, custom_fields={})
+            raise RuntimeError("pagination failed")
+
+        def filtered(**kwargs):
+            if "last_updated__gte" in kwargs:
+                return [recent]
+            if "role_id" in kwargs:
+                return lazy_failure()
+            return [recent]
+
+        endpoint.filter.side_effect = filtered
+
+        selected, candidates, _ = Sync()._collect_filtered_objects(
+            endpoint,
+            {"last_updated__gte": "2026-11-26T10:45:00+00:00"},
+            object_type="device",
+            delta=True,
+            policy_filters={},
+            dependency_filters=({"role_id": [7]},),
+        )
+
+        self.assertEqual(selected, [recent])
+        self.assertEqual(candidates, [recent])
+
     def test_invalid_custom_field_regex_fails_before_netbox_query(self):
         endpoint = MagicMock()
 
@@ -5807,6 +5836,43 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
             {"{'device_type_id': [5]}", "{'device_type_id': [6]}"},
         )
         self.assertEqual(vm_filters, [])
+        self.assertFalse(all_devices)
+        self.assertFalse(all_vms)
+
+    def test_context_history_tag_ids_are_resolved_to_slugs(self):
+        syncer = self._syncer(config={"delta_sync_minutes": 15})
+        syncer.netbox.extras.config_contexts.filter.return_value = [
+            SimpleNamespace(
+                id=10,
+                is_active=True,
+                roles=[],
+                tags=[SimpleNamespace(id=16, slug="operations")],
+            )
+        ]
+        syncer.netbox.core.object_changes.filter.return_value = [
+            SimpleNamespace(
+                changed_object_id=10,
+                prechange_data={"is_active": True, "tags": [15]},
+                postchange_data={"is_active": True, "tags": [16]},
+            )
+        ]
+        syncer.netbox.extras.tags.filter.return_value = [
+            SimpleNamespace(id=15, slug="development"),
+            SimpleNamespace(id=16, slug="operations"),
+        ]
+
+        device_filters, vm_filters, all_devices, all_vms = (
+            syncer._delta_config_context_scopes("2026-11-26T10:45:00+00:00")
+        )
+
+        self.assertEqual(
+            {repr(scope) for scope in device_filters},
+            {"{'tag': ['development']}", "{'tag': ['operations']}"},
+        )
+        self.assertEqual(
+            {repr(scope) for scope in vm_filters},
+            {"{'tag': ['development']}", "{'tag': ['operations']}"},
+        )
         self.assertFalse(all_devices)
         self.assertFalse(all_vms)
 

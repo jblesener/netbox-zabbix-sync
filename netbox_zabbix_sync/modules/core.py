@@ -393,7 +393,7 @@ class Sync:
                     records_by_id[self._record_id(record)] = record
             for dependency_filter in dependency_filters:
                 try:
-                    dependency_records = endpoint.filter(**dependency_filter)
+                    dependency_records = list(endpoint.filter(**dependency_filter))
                 except Exception as error:
                     logger.warning(
                         "Unable to expand a changed ConfigContext for %s (%s); "
@@ -467,7 +467,7 @@ class Sync:
         return getattr(record, field, default)
 
     @classmethod
-    def _context_scope_filter(cls, context, object_type):
+    def _context_scope_filter(cls, context, object_type, tag_slugs_by_id=None):
         allowed_fields = (
             cls._CONFIG_CONTEXT_DEVICE_FIELDS
             if object_type == "device"
@@ -483,6 +483,18 @@ class Sync:
             for value in values:
                 if field == "tags":
                     related = cls._record_value(value, "slug")
+                    if related is None and isinstance(value, int):
+                        related = (tag_slugs_by_id or {}).get(value)
+                    elif related is None and isinstance(value, str) and value.isdigit():
+                        related = (tag_slugs_by_id or {}).get(int(value))
+                    elif (
+                        related is None
+                        and isinstance(value, str)
+                        and not value.isdigit()
+                    ):
+                        related = value
+                    elif related is None:
+                        return None
                 else:
                     related = cls._record_value(value, "id")
                 if related is not None:
@@ -577,6 +589,38 @@ class Sync:
                 continue
             context_snapshots.extend(context_changes)
 
+        tag_ids = set()
+        for snapshot in context_snapshots:
+            tags = self._record_value(snapshot, "tags", []) or []
+            if not isinstance(tags, (list, tuple, set)):
+                tags = [tags]
+            for tag in tags:
+                slug = self._record_value(tag, "slug")
+                tag_id = self._record_value(tag, "id")
+                if slug is None and isinstance(tag_id, int):
+                    tag_ids.add(tag_id)
+                elif slug is None and isinstance(tag, int):
+                    tag_ids.add(tag)
+                elif slug is None and isinstance(tag, str) and tag.isdigit():
+                    tag_ids.add(int(tag))
+
+        tag_slugs_by_id = {}
+        if tag_ids:
+            try:
+                tags = list(netbox.extras.tags.filter(id=sorted(tag_ids)))
+            except Exception as error:
+                logger.warning(
+                    "Unable to resolve tag IDs for changed ConfigContexts (%s); "
+                    "affected contexts will be left for full sync.",
+                    error,
+                )
+            else:
+                tag_slugs_by_id = {
+                    self._record_id(tag): str(tag.slug)
+                    for tag in tags
+                    if getattr(tag, "slug", None)
+                }
+
         device_filters = []
         vm_filters = []
         device_unrestricted = False
@@ -584,8 +628,10 @@ class Sync:
         for snapshot in context_snapshots:
             if not self._record_value(snapshot, "is_active", True):
                 continue
-            device_filter = self._context_scope_filter(snapshot, "device")
-            vm_filter = self._context_scope_filter(snapshot, "vm")
+            device_filter = self._context_scope_filter(
+                snapshot, "device", tag_slugs_by_id
+            )
+            vm_filter = self._context_scope_filter(snapshot, "vm", tag_slugs_by_id)
             if device_filter:
                 device_filters.append(device_filter)
             elif device_filter == {}:
