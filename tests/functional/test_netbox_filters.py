@@ -14,8 +14,12 @@ that is only to pin down *how* the result was reached -- server-side rather
 than in Python, once rather than once per host.
 """
 
+import time
+from datetime import datetime, timedelta
+
 import pytest
 
+from netbox_zabbix_sync.modules import core
 from netbox_zabbix_sync.modules.exceptions import HostgroupError
 from tests.functional.bootstrap.seed_netbox import EXPECTED_HOSTGROUP
 from tests.functional.conftest import requests_to
@@ -33,7 +37,69 @@ FILTERED_CF_TYPES = {"text", "object", "select"}
 NO_DEVICE = "no-such-device"
 
 
+def _timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 # --- object_type: the custom field filter that regressed --------------------
+
+
+def _freeze_narrow_delta_window(monkeypatch, recent_timestamp: str):
+    timestamp = _timestamp(recent_timestamp)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return timestamp.astimezone(tz)
+
+    monkeypatch.setattr(core, "datetime", FrozenDateTime)
+    monkeypatch.setattr(
+        core,
+        "timedelta",
+        lambda **_kwargs: timedelta(milliseconds=10),
+    )
+
+
+def test_delta_last_updated_filter_excludes_older_devices(
+    monkeypatch,
+    device_factory,
+    sync_runner,
+    zabbix_host,
+):
+    older_device = device_factory()
+    time.sleep(0.1)
+    recent_device = device_factory()
+    _freeze_narrow_delta_window(monkeypatch, recent_device.last_updated)
+
+    sync_runner(
+        device_filter={"name": [older_device.name, recent_device.name]},
+        delta_sync_minutes=1,
+    )
+
+    assert zabbix_host(older_device.name) is None
+    assert zabbix_host(recent_device.name) is not None
+
+
+def test_delta_last_updated_filter_excludes_older_vms(
+    monkeypatch,
+    vm_factory,
+    sync_runner,
+    zabbix_host,
+):
+    older_vm = vm_factory()
+    time.sleep(0.1)
+    recent_vm = vm_factory()
+    _freeze_narrow_delta_window(monkeypatch, recent_vm.last_updated)
+
+    sync_runner(
+        device_filter={"name": NO_DEVICE},
+        vm_filter={"name": [older_vm.name, recent_vm.name]},
+        delta_sync_minutes=1,
+        sync_vms=True,
+    )
+
+    assert zabbix_host(older_vm.name) is None
+    assert zabbix_host(recent_vm.name) is not None
 
 
 def test_vm_custom_field_rejected_in_device_hostgroup(

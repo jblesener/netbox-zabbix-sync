@@ -4,6 +4,7 @@ import re
 import ssl
 from collections import defaultdict
 from collections.abc import Mapping, MutableMapping
+from datetime import UTC, datetime, timedelta
 from os import environ
 from pathlib import Path
 from pprint import pformat
@@ -30,7 +31,10 @@ from netbox_zabbix_sync.modules.exceptions import (
     SyncInventoryError,
 )
 from netbox_zabbix_sync.modules.logging import get_logger
-from netbox_zabbix_sync.modules.settings import DEFAULT_CONFIG
+from netbox_zabbix_sync.modules.settings import (
+    DEFAULT_CONFIG,
+    parse_delta_sync_minutes,
+)
 from netbox_zabbix_sync.modules.status_journal import SyncStatusJournal
 from netbox_zabbix_sync.modules.status_report import SyncStatusReport
 from netbox_zabbix_sync.modules.tools import (
@@ -157,6 +161,9 @@ class Sync:
         }
 
         self.config: dict[str, Any] = combined_config
+        self.config["delta_sync_minutes"] = parse_delta_sync_minutes(
+            self.config["delta_sync_minutes"]
+        )
         self.last_unsynced_summary: UnsyncedSummary | None = None
         self.last_cleanup_summary: CleanupSummary | None = None
         self.last_status_report: SyncStatusReport | None = None
@@ -354,7 +361,13 @@ class Sync:
         return filtered_records
 
     def _collect_filtered_objects(
-        self, endpoint, filters, custom_field_filters=None, object_type="NetBox object"
+        self,
+        endpoint,
+        filters,
+        custom_field_filters=None,
+        object_type="NetBox object",
+        *,
+        delta=False,
     ):
         """Return selected, report-candidate, and custom-field-excluded records."""
         compiled_custom_field_filters = self._compile_custom_field_filters(
@@ -362,7 +375,9 @@ class Sync:
             object_type,
         )
         netbox_filtered = list(endpoint.filter(**filters))
-        candidates = list(endpoint.all()) if filters else list(netbox_filtered)
+        candidates = (
+            list(netbox_filtered) if delta or not filters else list(endpoint.all())
+        )
         records_by_id = {self._record_id(record): record for record in candidates}
         records_by_id.update(
             {self._record_id(record): record for record in netbox_filtered}
@@ -1527,9 +1542,38 @@ class Sync:
             e = "Not able to start sync: No connection to NetBox or Zabbix API."
             self.logger.error(e)
             return False
+        delta_sync = self.config["delta_sync_minutes"] > 0
+        delta_cutoff = (
+            (
+                datetime.now(UTC) - timedelta(minutes=self.config["delta_sync_minutes"])
+            ).isoformat()
+            if delta_sync
+            else None
+        )
+        if delta_sync:
+            self.logger.info(
+                "Running delta sync for NetBox devices and VMs modified since %s.",
+                delta_cutoff,
+            )
+            skipped_categories = [
+                category
+                for category, enabled in (
+                    ("ONTAP clusters", self.config["sync_ontap_clusters"]),
+                    ("Azure subscriptions", self.config["sync_azure_subscriptions"]),
+                )
+                if enabled
+            ]
+            if skipped_categories:
+                self.logger.warning(
+                    "Delta mode does not process enabled %s; a full sync is required.",
+                    " or ".join(skipped_categories),
+                )
         summary = UnsyncedSummary()
         self.last_unsynced_summary = summary
-        status_report = SyncStatusReport()
+        status_report = SyncStatusReport(
+            mode="delta" if delta_sync else "full",
+            cutoff=delta_cutoff,
+        )
         self.last_status_report = status_report
         device_cfs = []
         vm_cfs = []
@@ -1565,6 +1609,8 @@ class Sync:
         dev_filter_combined = self._combine_filters(
             self.config["nb_device_filter"], device_filter
         )
+        if delta_cutoff is not None:
+            dev_filter_combined["last_updated__gte"] = delta_cutoff
         (
             netbox_devices,
             all_netbox_devices,
@@ -1577,6 +1623,7 @@ class Sync:
                 self.config["nb_device_custom_field_filter"],
             ),
             "device",
+            delta=delta_sync,
         )
         netbox_vms = []
         all_netbox_vms = []
@@ -1585,6 +1632,8 @@ class Sync:
             vm_filter_combined = self._combine_filters(
                 self.config["nb_vm_filter"], vm_filter
             )
+            if delta_cutoff is not None:
+                vm_filter_combined["last_updated__gte"] = delta_cutoff
             (
                 netbox_vms,
                 all_netbox_vms,
@@ -1597,11 +1646,12 @@ class Sync:
                     self.config["nb_vm_custom_field_filter"],
                 ),
                 "VM",
+                delta=delta_sync,
             )
         netbox_ontap_clusters = []
         all_netbox_ontap_clusters = []
         custom_field_excluded_clusters = []
-        if self.config["sync_ontap_clusters"]:
+        if self.config["sync_ontap_clusters"] and not delta_sync:
             (
                 netbox_ontap_clusters,
                 all_netbox_ontap_clusters,
@@ -1618,7 +1668,7 @@ class Sync:
         netbox_azure_subscriptions = []
         all_netbox_azure_subscriptions = []
         custom_field_excluded_tenants = []
-        if self.config["sync_azure_subscriptions"]:
+        if self.config["sync_azure_subscriptions"] and not delta_sync:
             (
                 netbox_azure_subscriptions,
                 all_netbox_azure_subscriptions,
@@ -1631,6 +1681,13 @@ class Sync:
                     self.config["nb_azure_subscription_custom_field_filter"],
                 ),
                 "Azure subscription Tenant",
+            )
+
+        if delta_sync:
+            self.logger.info(
+                "Delta selection found %s device(s) and %s VM(s).",
+                len(netbox_devices),
+                len(netbox_vms),
             )
 
         report_keys_by_label = {}
@@ -1915,7 +1972,14 @@ class Sync:
                             status_report, oob_key, summary, oob_label
                         )
 
-        cleanup_summary = self._cleanup_deleted_hosts(custom_field_excluded_sources)
+        if delta_sync:
+            self.logger.warning(
+                "Skipping owned-host deletion cleanup in delta mode; run a "
+                "full sync to reconcile deleted NetBox sources."
+            )
+            cleanup_summary = None
+        else:
+            cleanup_summary = self._cleanup_deleted_hosts(custom_field_excluded_sources)
         if cleanup_summary is not None:
             for target in cleanup_summary.removed_targets:
                 report_key = target.get("report_key")

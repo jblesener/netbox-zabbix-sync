@@ -11,10 +11,12 @@ from typing import Any
 class SyncStatusReport:
     """Collect target outcomes and write a JSON report."""
 
-    def __init__(self):
+    def __init__(self, *, mode: str = "full", cutoff: str | None = None):
         self._targets: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._source_records: dict[tuple[str, str, str], tuple[Any, str | None]] = {}
         self._models: dict[tuple[str, str, str], Any] = {}
+        self.mode = mode
+        self.cutoff = cutoff
 
     @staticmethod
     def _hostid(value: Any) -> str | None:
@@ -238,6 +240,8 @@ class SyncStatusReport:
         )
         return {
             "generated_at": datetime.now(UTC).isoformat(),
+            "mode": self.mode,
+            "cutoff": self.cutoff,
             "targets": targets,
         }
 

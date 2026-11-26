@@ -51,6 +51,57 @@ Each run performs one sync and exits, so schedule it to keep Zabbix up to date.
 See the [Quick Start](https://github.com/TheNetworkGuy/netbox-zabbix-sync/wiki/Quick-Start)
 for the upstream step-by-step guide.
 
+### Full and delta synchronization
+
+By default, each run is a **full sync**: it evaluates every configured NetBox
+category and, when `cleanup_deleted_hosts` is enabled, reconciles owned Zabbix
+hosts whose NetBox source no longer exists.
+
+Set `delta_sync_minutes` to a positive integer to run a rolling **delta sync**
+of devices and VMs. The sync calculates one UTC cutoff at startup and adds a
+`last_updated__gte` filter to the existing device and VM filters:
+
+```python
+# config.py
+delta_sync_minutes = 15
+```
+
+The equivalent one-shot options are:
+
+```bash
+NBZX_DELTA_SYNC_MINUTES=15 netbox-zabbix-sync
+netbox-zabbix-sync --delta-sync-minutes 15
+```
+
+Delta mode remains NetBox-authoritative. It selects directly changed NetBox
+devices and VMs, then performs the normal complete reconciliation for only
+those selected hosts. Zabbix state is still compared and corrected, but
+unchanged NetBox records outside the window are not queried as sync targets.
+ONTAP cluster and Azure subscription categories are not processed during a
+delta run.
+
+Global deletion cleanup is deliberately a full-sync operation because a
+timestamp window cannot contain records which were deleted from NetBox.
+Schedule periodic full runs in addition to frequent delta runs. Full runs also
+recover synchronization after changes to related NetBox data, such as sites,
+roles, device types, or config contexts, because those changes do not
+necessarily update every dependent device or VM's `last_updated` timestamp.
+Delta windows can overlap, so use an interval shorter than the configured
+window to avoid missing boundary changes. The overlapping records are
+reconciled idempotently.
+
+For Docker, append the override to the existing one-shot command:
+
+```bash
+docker run --rm \
+  -e NETBOX_HOST=https://netbox.example.com \
+  -e NETBOX_TOKEN=your_netbox_token \
+  -e ZABBIX_HOST=https://zabbix.example.com \
+  -e ZABBIX_TOKEN=your_zabbix_token \
+  ghcr.io/jblesener/netbox-zabbix-sync:latest \
+  /opt/netbox-zabbix/netbox_zabbix_sync.py --delta-sync-minutes 15
+```
+
 ## Installation
 
 - **Docker:** `ghcr.io/jblesener/netbox-zabbix-sync`
@@ -109,8 +160,9 @@ directory (the same directory used for `sync.log`). Mount that directory if a
 host-side static webpage needs to read the report. The file is replaced
 atomically after each run.
 
-The JSON contains a `generated_at` timestamp and a `targets` array. Each target
-has this shape:
+The JSON contains a `generated_at` timestamp, a `mode` (`full` or `delta`), the
+delta `cutoff` (`null` for a full sync), and a `targets` array. Each target has
+this shape:
 
 ```json
 {
@@ -140,11 +192,14 @@ defined in NetBox, or an empty list when there are none. Automatically
 discovered macros and macros explicitly cleared by NetBox are excluded. Macro
 values are never included, and non-empty lists are also written to the log.
 
-Targets include all objects in enabled sync categories, including those
-excluded by configured filters, plus sync skips, failures, and removals.
-Categories disabled by configuration are not scanned for the report. A
-report-write error is logged but does not fail an otherwise completed sync; if
-that happens, the previous report remains in place.
+During full sync, targets include all objects in enabled sync categories,
+including those excluded by configured filters, plus sync skips, failures, and
+removals. During delta sync, the report contains only device/VM records selected
+by the rolling NetBox query (including in-window records excluded by a
+configured custom-field filter). Categories disabled by configuration and
+objects outside the delta window are not scanned for the report. A report-write
+error is logged but does not fail an otherwise completed sync; if that happens,
+the previous report remains in place.
 
 Sync outcomes are recorded on the source record as NetBox status journal
 entries for devices (including OOB imports), VMs, ONTAP clusters, and Azure

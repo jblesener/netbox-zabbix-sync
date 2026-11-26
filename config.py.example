@@ -50,6 +50,12 @@ description_dt_format = "%Y-%m-%d %H:%M:%S"
 ## Enable clustering of devices with virtual chassis setup
 clustering = False
 
+## Delta synchronization
+# 0 performs a full sync (including owned-host deletion cleanup). Set a
+# positive number of minutes to reconcile only devices and VMs whose NetBox
+# last_updated timestamp is within that rolling window.
+delta_sync_minutes = 0
+
 ## Extend Virtual Chassis Information
 # When set to True, the script will pull extended virtual chassis information which is then available for use in usermacros, tags and inventory.
 # Be aware that this will increase the number of API queries to NetBox.

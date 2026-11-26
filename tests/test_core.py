@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -5433,6 +5434,23 @@ class TestCustomFieldFilters(unittest.TestCase):
         self.assertEqual(candidates, [api_filtered_in, api_filtered_out])
         self.assertEqual(custom_field_excluded, [])
 
+    def test_delta_collection_does_not_expand_to_all_candidates(self):
+        recent = SimpleNamespace(id=1, custom_fields={})
+        endpoint = MagicMock()
+        endpoint.filter.return_value = [recent]
+
+        selected, candidates, custom_field_excluded = Sync()._collect_filtered_objects(
+            endpoint,
+            {"last_updated__gte": "2026-11-26T10:45:00+00:00"},
+            object_type="device",
+            delta=True,
+        )
+
+        self.assertEqual(selected, [recent])
+        self.assertEqual(candidates, [recent])
+        self.assertEqual(custom_field_excluded, [])
+        endpoint.all.assert_not_called()
+
     def test_invalid_custom_field_regex_fails_before_netbox_query(self):
         endpoint = MagicMock()
 
@@ -5549,6 +5567,76 @@ class TestUnsyncedObjectSummary(unittest.TestCase):
             all(target["sync_result"] == "excluded_by_filter" for target in targets)
         )
         syncer.netbox.tenancy.tenants.filter.assert_called_once_with(tag="azure")
+
+    def test_delta_sync_filters_devices_and_vms_and_skips_full_cleanup(self):
+        device = MockNetboxDevice(name="recent-device")
+        vm = MockNetboxVM(name="recent-vm")
+        syncer = self._syncer(
+            devices=[device],
+            vms=[vm],
+            config={
+                "delta_sync_minutes": 15,
+                "sync_vms": True,
+                "sync_ontap_clusters": True,
+                "sync_azure_subscriptions": True,
+                "cleanup_deleted_hosts": True,
+            },
+        )
+        fixed_now = datetime(2026, 11, 26, 11, 0, tzinfo=UTC)
+        syncer.zabbix.version = 7.0
+
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ),
+            patch("netbox_zabbix_sync.modules.core.datetime") as mock_datetime,
+            patch.object(syncer, "_cleanup_deleted_hosts") as cleanup,
+        ):
+            mock_datetime.now.return_value = fixed_now
+            self.assertTrue(syncer.start())
+
+        cutoff = "2026-11-26T10:45:00+00:00"
+        syncer.netbox.dcim.devices.filter.assert_called_once_with(
+            name__n="null",
+            last_updated__gte=cutoff,
+        )
+        syncer.netbox.virtualization.virtual_machines.filter.assert_called_once_with(
+            name__n="null",
+            last_updated__gte=cutoff,
+        )
+        syncer.netbox.dcim.devices.all.assert_not_called()
+        syncer.netbox.virtualization.virtual_machines.all.assert_not_called()
+        syncer.netbox.virtualization.clusters.filter.assert_not_called()
+        syncer.netbox.tenancy.tenants.filter.assert_not_called()
+        cleanup.assert_not_called()
+        report = syncer.last_status_report.document()
+        self.assertEqual(report["mode"], "delta")
+        self.assertEqual(report["cutoff"], cutoff)
+        self.assertEqual(
+            {target["name"] for target in report["targets"]},
+            {"recent-device", "recent-vm"},
+        )
+
+    def test_full_sync_retains_complete_candidates_and_cleanup(self):
+        syncer = self._syncer()
+
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch(
+                "netbox_zabbix_sync.modules.core.Path.cwd",
+                return_value=Path(temp_dir),
+            ),
+            patch.object(syncer, "_cleanup_deleted_hosts") as cleanup,
+        ):
+            self.assertTrue(syncer.start())
+
+        cleanup.assert_called_once()
+        self.assertEqual(
+            syncer.last_status_report.document()["mode"],
+            "full",
+        )
 
     def test_custom_field_exclusion_cleans_owned_host_and_updates_status(self):
         device = MockNetboxDevice(name="filtered-device", zabbix_hostid=101)

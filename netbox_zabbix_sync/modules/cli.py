@@ -195,6 +195,14 @@ _STR_ARGS = [
     ),
 ]
 
+_INT_ARGS = [
+    (
+        "delta_sync_minutes",
+        "Sync devices and VMs modified within this many minutes; 0 runs a full sync.",
+        "MINUTES",
+    ),
+]
+
 
 def get_version() -> str:
     """Return the installed package version, or "unknown" when running from source."""
@@ -211,6 +219,10 @@ def _apply_cli_overrides(config: dict, arguments: argparse.Namespace) -> dict:
         if cli_val is not None:
             config[key] = cli_val
     for key, _help, _meta in _STR_ARGS:
+        cli_val = getattr(arguments, key, None)
+        if cli_val is not None:
+            config[key] = cli_val
+    for key, _help, _meta in _INT_ARGS:
         cli_val = getattr(arguments, key, None)
         if cli_val is not None:
             config[key] = cli_val
@@ -359,6 +371,16 @@ def parse_cli():
         action="store_const",
         const=False,
     )
+    for key, help_text, metavar in _INT_ARGS:
+        flag = key.replace("_", "-")
+        str_group.add_argument(
+            f"--{flag}",
+            dest=key,
+            help=help_text,
+            metavar=metavar,
+            type=int,
+            default=None,
+        )
 
     args = parser.parse_args()
     main(args)

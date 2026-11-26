@@ -4,12 +4,15 @@ import os
 from argparse import Namespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from netbox_zabbix_sync.modules.cli import _apply_cli_overrides
 from netbox_zabbix_sync.modules.settings import (
     DEFAULT_CONFIG,
     load_config,
     load_config_file,
     load_env_variable,
+    parse_delta_sync_minutes,
 )
 
 
@@ -253,6 +256,50 @@ def test_stale_hostid_cleanup_can_be_overridden_on_the_cli():
     result = _apply_cli_overrides(config, Namespace(clear_stale_zabbix_hostids=True))
 
     assert result["clear_stale_zabbix_hostids"] is True
+
+
+def test_delta_sync_minutes_defaults_and_overrides():
+    assert DEFAULT_CONFIG["delta_sync_minutes"] == 0
+    delta_minutes = 15
+
+    result = _apply_cli_overrides(
+        DEFAULT_CONFIG.copy(), Namespace(delta_sync_minutes=delta_minutes)
+    )
+
+    assert result["delta_sync_minutes"] == delta_minutes
+
+
+def test_delta_sync_minutes_environment_value_is_coerced():
+    delta_minutes = 15
+
+    def load_env(key):
+        return str(delta_minutes) if key == "delta_sync_minutes" else None
+
+    with (
+        patch(
+            "netbox_zabbix_sync.modules.settings.load_config_file",
+            return_value=DEFAULT_CONFIG.copy(),
+        ),
+        patch(
+            "netbox_zabbix_sync.modules.settings.load_env_variable",
+            side_effect=load_env,
+        ),
+    ):
+        assert load_config()["delta_sync_minutes"] == delta_minutes
+
+
+@pytest.mark.parametrize("value", ["1", 1])
+def test_delta_sync_minutes_accepts_non_negative_integers(value):
+    assert parse_delta_sync_minutes(value) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, -1, "", "1.5", "invalid", None],
+)
+def test_delta_sync_minutes_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        parse_delta_sync_minutes(value)
 
 
 def test_lld_hostgroup_sync_can_be_overridden_on_the_cli():

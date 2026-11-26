@@ -13,6 +13,7 @@ logger = getLogger(__name__)
 # You should create your own config.py and it will overwrite the default config.
 
 DEFAULT_CONFIG = {
+    "delta_sync_minutes": 0,
     "templates_config_context": False,
     "templates_config_context_overrule": False,
     "template_cf": "zabbix_template",
@@ -163,6 +164,8 @@ def parse_env_value(key, value):
     Other values, such as "full" for usermacro_sync or a custom field
     name for proxy_cf, are returned unchanged.
     """
+    if key == "delta_sync_minutes":
+        return parse_delta_sync_minutes(value)
     if not isinstance(value, str) or not isinstance(DEFAULT_CONFIG.get(key), bool):
         return value
     if value.strip().lower() in ("true", "1", "yes", "on"):
@@ -170,6 +173,24 @@ def parse_env_value(key, value):
     if value.strip().lower() in ("false", "0", "no", "off"):
         return False
     return value
+
+
+def parse_delta_sync_minutes(value):
+    """Return a valid non-negative delta window in minutes."""
+    if isinstance(value, bool):
+        raise ValueError("delta_sync_minutes must be a non-negative integer.")
+    if isinstance(value, int):
+        minutes = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or not stripped.isdecimal():
+            raise ValueError("delta_sync_minutes must be a non-negative integer.")
+        minutes = int(stripped)
+    else:
+        raise ValueError("delta_sync_minutes must be a non-negative integer.")
+    if minutes < 0:
+        raise ValueError("delta_sync_minutes must be a non-negative integer.")
+    return minutes
 
 
 def load_env_variable(config_environvar):
